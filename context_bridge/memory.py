@@ -42,3 +42,20 @@ def get_recent_checkpoints(project_id: str, n: int = 10) -> list[dict]:
             (project_id, n),
         ).fetchall()
     return [json.loads(row[0]) for row in rows]
+
+
+def get_all_projects() -> list[dict]:
+    """Return all project_ids with checkpoint count and latest timestamp, newest first."""
+    with sqlite3.connect(DB_PATH) as conn:
+        rows = conn.execute(
+            """
+            SELECT project_id, COUNT(*) as count, MAX(timestamp) as latest
+            FROM checkpoints
+            GROUP BY project_id
+            ORDER BY latest DESC
+            """
+        ).fetchall()
+    return [
+        {"project_id": r[0], "checkpoint_count": r[1], "last_active": r[2]}
+        for r in rows
+    ]
