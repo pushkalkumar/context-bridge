@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "context-bridge"
+version = "0.1.0"
+description = "Checkpoint-based replanning system for Claude Code — persistent memory across tasks"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "anthropic",
+    "python-dotenv",
+]
+
+[project.urls]
+Homepage = "https://github.com/pushkal-kumar/context-bridge"
+Issues = "https://github.com/pushkal-kumar/context-bridge/issues"
+
+[project.scripts]
+context-bridge = "context_bridge.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["context_bridge*"]
