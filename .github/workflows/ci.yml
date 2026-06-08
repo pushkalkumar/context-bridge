@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package
+        run: pip install -e .
+
+      - name: Verify imports
+        run: |
+          python -c "
+          from context_bridge.main import app
+          from context_bridge.planner import run_planner, build_prompt
+          from context_bridge.memory import init_db, save_checkpoint, get_recent_checkpoints, get_all_projects
+          from context_bridge.models import Checkpoint, PlannerOutput
+          from context_bridge.cli import main
+          print('All imports OK')
+          "
+
+      - name: Verify rule-based planner (no API key)
+        run: |
+          python -c "
+          from context_bridge.planner import _rule_based
+          cp = {
+              'project_id': 'test',
+              'user_goal': 'Build something',
+              'current_task': 'Set up project',
+              'progress_summary': 'Nothing yet',
+              'current_state': {'files_modified': [], 'code_summary': '', 'architecture_notes': ''},
+              'blockers': [],
+              'next_intended_action': 'Create main.py',
+          }
+          result = _rule_based(cp, [])
+          assert result.next_instruction
+          assert result.context_summary
+          print('Rule-based planner OK:', result.next_instruction)
+          "

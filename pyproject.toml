@@ -5,9 +5,24 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "context-bridge"
 version = "0.1.0"
-description = "Checkpoint-based replanning system for Claude Code — persistent memory across tasks"
+description = "Persistent memory for Claude Code — checkpoint-based replanning across sessions"
 readme = "README.md"
 requires-python = ">=3.9"
+license = {text = "MIT"}
+keywords = ["claude-code", "memory", "context", "ai-agents", "checkpoint", "replanning"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
@@ -27,4 +42,4 @@ where = ["."]
 include = ["context_bridge*"]
 
 [tool.setuptools.package-data]
-context_bridge = ["dashboard.html"]
+context_bridge = ["dashboard.html", "skill.md"]
