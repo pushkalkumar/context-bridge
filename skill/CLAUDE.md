@@ -17,7 +17,7 @@ POST a checkpoint before starting any task:
 curl -s -X POST http://localhost:7723/sync \
   -H "Content-Type: application/json" \
   -d '{
-    "project_id": "<reponame-YYYYMMDD or dirname-YYYYMMDD>",
+    "project_id": "<reponame/branch or dirname>",
     "user_goal": "<overarching goal>",
     "current_task": "<specific task starting now>",
     "progress_summary": "<what has been done>",

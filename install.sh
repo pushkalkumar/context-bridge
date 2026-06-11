@@ -14,7 +14,7 @@ if ! python3 -c "import sys; assert sys.version_info >= (3, 11)" 2>/dev/null; th
     exit 1
 fi
 
-pip install -q "git+https://github.com/pushkal-kumar/context-bridge.git"
+pip install -q "git+https://github.com/pushkalkumar/context-bridge.git"
 
 mkdir -p "$HOME/.context-bridge"
 [ ! -f "$HOME/.context-bridge/.env" ] && echo "ANTHROPIC_API_KEY=" > "$HOME/.context-bridge/.env"
