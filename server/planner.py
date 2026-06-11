@@ -1,12 +1,14 @@
 import json
+import logging
 from collections import Counter
-from difflib import SequenceMatcher
 
 from .config import settings
 from .models import SyncResponse
 
+logger = logging.getLogger(__name__)
 
-# ── Prompt builder ────────────────────────────────────────────────────────────
+
+# ── Prompt ────────────────────────────────────────────────────────────────────
 
 def _build_prompt(user_goal: str, history: list[dict], current: dict) -> str:
     history_lines = "\n".join(
@@ -23,33 +25,30 @@ def _build_prompt(user_goal: str, history: list[dict], current: dict) -> str:
         )
         for c in history
     )
-    state = current.get("current_state", {})
-    return f"""You are a coding project planner. Return a JSON plan for the current checkpoint.
-
-## Goal
-{user_goal}
-
-## History (newest first)
-{history_lines or "(no prior checkpoints)"}
-
-## Current checkpoint
-task: {current["current_task"]}
-progress: {current["progress_summary"]}
-files: {", ".join(state.get("files_modified", [])) or "none"}
-git_diff: {state.get("git_diff_stat", "")}
-blockers: {", ".join(current.get("blockers", [])) or "none"}
-next_intended: {current.get("next_intended_action", "")}
-stagnation_count: {current.get("stagnation_count", 1)}
-
-If the same task recurs across checkpoints, address why it is stuck and force decomposition.
-
-Return ONLY valid JSON:
-{{
-  "next_instruction": "the single next action Claude Code should take",
-  "context_summary": "concise state-of-project summary",
-  "revised_plan": "updated step-by-step plan from here",
-  "priority_focus": "the single most important constraint right now"
-}}"""
+    state = current.get("current_state") or {}
+    if hasattr(state, "model_dump"):
+        state = state.model_dump()
+    return (
+        "You are a coding project planner. Return a JSON plan for the current checkpoint.\n\n"
+        f"## Goal\n{user_goal}\n\n"
+        f"## History (newest first)\n{history_lines or '(no prior checkpoints)'}\n\n"
+        "## Current checkpoint\n"
+        f"task: {current['current_task']}\n"
+        f"progress: {current['progress_summary']}\n"
+        f"files: {', '.join(state.get('files_modified', [])) or 'none'}\n"
+        f"git_diff: {state.get('git_diff_stat', '')}\n"
+        f"blockers: {', '.join(current.get('blockers', [])) or 'none'}\n"
+        f"next_intended: {current.get('next_intended_action', '')}\n"
+        f"stagnation_count: {current.get('stagnation_count', 1)}\n\n"
+        "If the same task recurs across checkpoints, address why it is stuck and force decomposition.\n\n"
+        "Return ONLY valid JSON:\n"
+        '{\n'
+        '  "next_instruction": "the single next action Claude Code should take",\n'
+        '  "context_summary": "concise state-of-project summary",\n'
+        '  "revised_plan": "updated step-by-step plan from here",\n'
+        '  "priority_focus": "the single most important constraint right now"\n'
+        "}"
+    )
 
 
 def _parse(raw: str) -> dict:
@@ -75,6 +74,7 @@ def _run_anthropic(checkpoint: dict, history: list[dict]) -> SyncResponse | None
             messages=[{"role": "user", "content": prompt}],
         )
         if msg.stop_reason == "refusal":
+            logger.warning("Anthropic refused to plan checkpoint — falling through to next tier")
             return None
         data = _parse(msg.content[0].text)
         return SyncResponse(
@@ -82,14 +82,16 @@ def _run_anthropic(checkpoint: dict, history: list[dict]) -> SyncResponse | None
             source="anthropic",
             stagnation_count=checkpoint.get("stagnation_count", 1),
         )
-    except Exception:
+    except Exception as exc:
+        # 429 rate limit, network errors, parse failures — all fall through
+        logger.warning("Anthropic planner failed (%s: %s) — trying next tier", type(exc).__name__, exc)
         return None
 
 
 # ── Tier 2: Ollama ────────────────────────────────────────────────────────────
 
 def _run_ollama(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
-    host = settings.ollama_host
+    host = settings.resolved_ollama_host()
     if not host:
         return None
     try:
@@ -105,7 +107,7 @@ def _run_ollama(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
                 ],
                 "stream": False,
             },
-            timeout=60,
+            timeout=60.0,
         )
         r.raise_for_status()
         data = _parse(r.json()["message"]["content"])
@@ -114,7 +116,8 @@ def _run_ollama(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
             source="ollama",
             stagnation_count=checkpoint.get("stagnation_count", 1),
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning("Ollama planner failed (%s: %s) — falling back to rule-based", type(exc).__name__, exc)
         return None
 
 
@@ -126,43 +129,49 @@ def _rule_based(checkpoint: dict, history: list[dict], stagnation_count: int) ->
 
     if stagnation_count >= 3:
         instruction = (
-            f"You have submitted '{task}' {stagnation_count} consecutive times. "
-            "Break it into the smallest possible subtask completable in a single step."
+            f"You have submitted '{task}' {stagnation_count} times in a row. "
+            "Pick the smallest completable subtask and do only that one thing."
         )
-        priority = f"Stagnation — same task for {stagnation_count} checkpoints"
+        priority = f"Stagnation on '{task}' ({stagnation_count} consecutive checkpoints)"
     else:
-        # Recurring blocker detection across history
         all_blockers = [b for c in history for b in c.get("blockers", [])]
         top = Counter(all_blockers).most_common(1)
         if top and top[0][1] >= 2:
             blocker, count = top[0]
             instruction = (
-                f"Recurring blocker '{blocker}' has appeared {count} times. "
-                f"Resolve it first, then: {checkpoint.get('next_intended_action', '')}"
+                f"'{blocker}' has blocked you {count} times. Fix it before anything else. "
+                f"Then: {checkpoint.get('next_intended_action', '')}"
             )
-            priority = f"Recurring blocker (×{count}): {blocker}"
+            priority = f"Recurring blocker (x{count}): {blocker}"
         elif blockers:
-            instruction = f"Resolve blocker: {blockers[0]}. Then: {checkpoint.get('next_intended_action', '')}"
+            instruction = (
+                f"Resolve: {blockers[0]}. "
+                f"Then: {checkpoint.get('next_intended_action', '')}"
+            )
             priority = blockers[0]
         else:
             instruction = checkpoint.get("next_intended_action", "Continue.")
-            priority = "No blockers — proceed"
+            priority = "No blockers"
 
-    state = checkpoint.get("current_state", {})
+    state = checkpoint.get("current_state") or {}
+    if hasattr(state, "model_dump"):
+        state = state.model_dump()
     files = state.get("files_modified", [])
     context = (
-        f"Goal: {checkpoint['user_goal']} | Task: {task} | Progress: {checkpoint['progress_summary']}"
+        f"Goal: {checkpoint['user_goal']} | "
+        f"Task: {task} | "
+        f"Progress: {checkpoint['progress_summary']}"
         + (f" | Files: {', '.join(files[-3:])}" if files else "")
     )
 
-    has_llm = bool(settings.anthropic_api_key) or bool(settings.ollama_host)
+    ollama_available = bool(settings.resolved_ollama_host())
+    has_llm = bool(settings.anthropic_api_key) or ollama_available
     plan = (
         f"Continue toward: {checkpoint['user_goal']}"
         if has_llm
         else (
-            "No LLM configured. Add ANTHROPIC_API_KEY to ~/.context-bridge/.env "
-            "or set OLLAMA_HOST (e.g. http://localhost:11434). "
-            "Checkpoints and history are stored regardless."
+            "No LLM configured. Add ANTHROPIC_API_KEY or OLLAMA_HOST to "
+            "~/.context-bridge/.env. Checkpoints and history are stored regardless."
         )
     )
 
@@ -176,10 +185,8 @@ def _rule_based(checkpoint: dict, history: list[dict], stagnation_count: int) ->
     )
 
 
-# ── Public entry point ────────────────────────────────────────────────────────
+# ── Entry point ───────────────────────────────────────────────────────────────
 
 def run_planner(checkpoint: dict, history: list[dict], stagnation_count: int) -> SyncResponse:
     result = _run_anthropic(checkpoint, history) or _run_ollama(checkpoint, history)
-    if result:
-        return result
-    return _rule_based(checkpoint, history, stagnation_count)
+    return result or _rule_based(checkpoint, history, stagnation_count)
