@@ -223,27 +223,30 @@ def _configure_hooks() -> None:
         print(f"  Hooks OK  -> {_SETTINGS_PATH}")
 
 
-def _do_status() -> None:
+def _fetch(path: str, timeout: float = 2.0):
     import urllib.request
-    url = f"http://127.0.0.1:{settings.server_port}/health"
     try:
-        with urllib.request.urlopen(url, timeout=2) as r:
-            data = json.loads(r.read())
-            print(f"Backend    running on port {data['port']}")
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{settings.server_port}{path}", timeout=timeout
+        ) as r:
+            return json.loads(r.read())
     except Exception:
+        return None
+
+
+def _do_status() -> None:
+    data = _fetch("/health")
+    if not data:
         print(f"Backend    not running  (start with: context-bridge)")
         return
-
+    print(f"Backend    running on port {data['port']}")
     print(f"DB         {settings.db_path}")
-    try:
-        url = f"http://127.0.0.1:{settings.server_port}/stats"
-        with urllib.request.urlopen(url, timeout=2) as r:
-            s = json.loads(r.read())
-            print(f"Projects   {s['total_projects']}")
-            print(f"Checkpoints {s['total_checkpoints']}")
-            print(f"Stagnation events {s['stagnation_events']}")
-    except Exception:
-        pass
+
+    s = _fetch("/stats")
+    if s:
+        print(f"Projects   {s['total_projects']}")
+        print(f"Checkpoints {s['total_checkpoints']}")
+        print(f"Stagnation {s['stagnation_events']} events")
 
     planner = "rule-based (no LLM configured)"
     if settings.anthropic_api_key:
@@ -251,6 +254,43 @@ def _do_status() -> None:
     elif settings.resolved_ollama_host():
         planner = f"Ollama ({settings.ollama_model})"
     print(f"Planner    {planner}")
+
+
+def _do_list() -> None:
+    data = _fetch("/health")
+    if not data:
+        print("Backend not running. Start it with: context-bridge")
+        return
+
+    projects = _fetch("/projects")
+    if not projects:
+        print("No projects yet. Open Claude Code in a git repo and run a task.")
+        return
+
+    col_w = max(len(p["project_id"]) for p in projects) + 2
+    for p in projects:
+        pid = p["project_id"].ljust(col_w)
+        n = f"{p['checkpoint_count']} checkpoint{'s' if p['checkpoint_count'] != 1 else ''}"
+        stag = p.get("stagnation_count", 0)
+        stag_str = f"  ⚠ stagnant ({stag}x)" if stag >= 3 else ""
+        ts = p.get("last_active", "")
+        if ts:
+            from datetime import datetime, timezone
+            try:
+                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                diff = datetime.now(timezone.utc) - dt
+                s = diff.total_seconds()
+                if s < 3600:
+                    age = f"{int(s // 60)}m ago"
+                elif s < 86400:
+                    age = f"{int(s // 3600)}h ago"
+                else:
+                    age = f"{int(s // 86400)}d ago"
+            except Exception:
+                age = ts
+        else:
+            age = ""
+        print(f"  {pid}{n:<20}{age}{stag_str}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -264,12 +304,15 @@ def run() -> None:
     sub.add_parser("install", help="Install skill + lifecycle hooks to ~/.claude/")
     sub.add_parser("start",   help="Start the backend server (default)")
     sub.add_parser("status",  help="Check backend status and planner configuration")
+    sub.add_parser("list",    help="List all projects with checkpoint counts")
     args = parser.parse_args()
 
     if args.cmd == "install":
         _do_install()
     elif args.cmd == "status":
         _do_status()
+    elif args.cmd == "list":
+        _do_list()
     else:
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Context Bridge  http://127.0.0.1:{settings.server_port}")
