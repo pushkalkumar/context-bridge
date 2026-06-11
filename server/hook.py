@@ -43,6 +43,7 @@ def _write(sid: str, key: str, value: str) -> None:
 # ── Project ID ────────────────────────────────────────────────────────────────
 
 def _project_id() -> str:
+    """Stable ID: reponame/branch (e.g. my-app/main). No date suffix — history is continuous."""
     try:
         remote = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
@@ -50,8 +51,19 @@ def _project_id() -> str:
         ).strip()
         name = remote.rstrip("/").split("/")[-1].removesuffix(".git")
     except Exception:
-        name = Path.cwd().name
-    return f"{name}-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+        name = Path.cwd().name or "unknown"
+
+    try:
+        branch = subprocess.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if branch and branch not in ("HEAD", ""):
+            return f"{name}/{branch}"
+    except Exception:
+        pass
+
+    return name
 
 
 # ── Git metadata ──────────────────────────────────────────────────────────────
