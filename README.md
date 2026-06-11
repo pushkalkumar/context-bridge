@@ -1,47 +1,30 @@
 # context-bridge
 
-> Claude Code starts every session with zero memory. Context Bridge fixes that.
+Claude Code forgets everything between sessions. Context Bridge fixes that.
 
 [![CI](https://github.com/pushkal-kumar/context-bridge/actions/workflows/ci.yml/badge.svg)](https://github.com/pushkal-kumar/context-bridge/actions/workflows/ci.yml)
 [![PyPI version](https://img.shields.io/pypi/v/context-bridge)](https://pypi.org/project/context-bridge/)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
-[![API key](https://img.shields.io/badge/API%20key-optional-brightgreen)](https://github.com/pushkal-kumar/context-bridge#add-ai-planning-optional)
+[![API key](https://img.shields.io/badge/API%20key-optional-brightgreen)](#planner-tiers)
 
 ---
 
-## The problem
+## What it does
 
-Claude Code has no memory between sessions. Every time you open a project you re-explain:
-
-- What you built in the last session and why
-- Which files were modified and what they do
-- What broke, what was deferred, what decisions were made
-- Where you were heading next
-
-A 30-minute coding session requires a 5-minute re-orientation tax every single time.
-
-## How it fixes it
-
-**Without Context Bridge — starting Session 2:**
+Before every task, Claude Code posts a checkpoint to a local server. The server stores
+checkpoint history and returns an authoritative plan. On the next session, it injects
+that context automatically — before Claude Code's first message.
 
 ```
-You:   "Let's continue on the auth API"
-Claude: "Sure! What are you working on? What's the current state?"
-You:   [re-explains everything]
-```
+Session 1 ends:
+  Hook fires → POST /sync → checkpoint stored
 
-**With Context Bridge — starting Session 2:**
-
-```
-Claude POSTs to /sync → receives:
-
-next_instruction  → "Implement GET /me protected route. JWT middleware is
-                     already in auth.py — reuse it, don't recreate it."
-context_summary   → "JWT auth complete: HS256, tokens in Redis, /register
-                     and /login endpoints done. Files: auth.py, models.py,
-                     main.py, redis_client.py"
-priority_focus    → "SECRET_KEY must come from env — you left it hardcoded
-                     in auth.py:34 last session"
+Session 2 starts:
+  SessionStart hook fires →
+  [context-bridge] Session context restored:
+    Summary:  JWT auth complete. /register and /login done. Files: auth.py, models.py.
+    Next:     Implement GET /me — reuse the JWT middleware in auth.py, don't recreate it.
+    Priority: SECRET_KEY must come from env — it was hardcoded in auth.py:34 last session
 ```
 
 Zero re-orientation. Claude picks up exactly where it left off.
@@ -51,194 +34,157 @@ Zero re-orientation. Claude picks up exactly where it left off.
 ## Install
 
 ```bash
+pip install context-bridge
+context-bridge install   # installs skill + lifecycle hooks to ~/.claude/
+context-bridge           # starts the backend on port 7723
+```
+
+Or one command:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/pushkal-kumar/context-bridge/main/install.sh | bash
 ```
 
-Or with pip:
-
-```bash
-pip install git+https://github.com/pushkal-kumar/context-bridge.git
-```
-
 ---
 
-## Start the backend
+## Planner tiers
+
+The backend runs the best available planner automatically, in this order:
+
+| Tier | Requirement | Quality |
+|------|-------------|---------|
+| Anthropic | `ANTHROPIC_API_KEY` in env or `~/.context-bridge/.env` | Best |
+| Ollama | `OLLAMA_HOST=http://localhost:11434` | Good, free |
+| Rule-based | Nothing | Works offline, detects stagnation |
+
+The rule-based tier is not a fallback you reluctantly use — it is genuinely useful.
+It detects when Claude Code is stuck (same task for 3+ checkpoints), surfaces recurring
+blockers, and tells Claude exactly what to do about them.
 
 ```bash
-context-bridge
-# → http://127.0.0.1:8000
-# → Dashboard at http://127.0.0.1:8000/
+# Use Anthropic:
+echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.context-bridge/.env
+
+# Use Ollama:
+echo 'OLLAMA_HOST=http://localhost:11434' >> ~/.context-bridge/.env
+echo 'OLLAMA_MODEL=qwen2.5-coder:7b' >> ~/.context-bridge/.env
 ```
-
----
-
-## Add AI planning (optional)
-
-> ✅ **Works without an API key.** Checkpoints are always stored. History is always available.
-> AI planning is an optional enhancement — the tool is useful without it.
-
-**Option A — Anthropic** (best quality):
-```bash
-echo 'ANTHROPIC_API_KEY=sk-ant-...' > ~/.context-bridge/.env
-```
-
-**Option B — Ollama** (free, runs locally, zero cost):
-```bash
-# Install from https://ollama.ai, then:
-ollama pull llama3.2
-# Context Bridge auto-detects Ollama — no config needed
-```
-
-Without either, the backend runs stagnation detection and blocker pattern analysis entirely locally — and still catches when Claude Code is going in circles.
-
----
-
-## Add the skill to Claude Code
-
-Claude Code reads a `CLAUDE.md` file in your project root (or `~/.claude/CLAUDE.md` globally) to know how to behave. The skill file tells it to checkpoint before every task.
-
-**One command:**
-```bash
-context-bridge install
-# ✅ Skill installed. Claude Code will now checkpoint every task.
-```
-
-Or manually — add this line to your project's or global `CLAUDE.md`:
-```
-@~/.claude/context-bridge.md
-```
-
----
-
-## See it in action
-
-**Session 1** — you finish implementing auth and checkpoint before closing:
-
-```bash
-curl -s -X POST http://localhost:8000/sync \
-  -H "Content-Type: application/json" \
-  -d '{
-    "project_id": "myapi-20260607",
-    "timestamp": "2026-06-07T18:00:00",
-    "user_goal": "Build JWT authentication for the API",
-    "current_task": "Implement /login endpoint",
-    "progress_summary": "FastAPI app set up, User model done, /register works with bcrypt hashing",
-    "current_state": {
-      "files_modified": ["main.py", "models.py", "auth.py"],
-      "code_summary": "FastAPI + SQLite. /register endpoint tested and passing.",
-      "architecture_notes": "HS256 for JWT, python-jose library, bcrypt via passlib"
-    },
-    "blockers": [],
-    "next_intended_action": "Implement GET /me protected route"
-  }'
-```
-
-**Response saved with the checkpoint:**
-
-```json
-{
-  "next_instruction": "Implement GET /me: extract user_id from JWT in Authorization header using the middleware already in auth.py — don't recreate it. Return {id, email, created_at}.",
-  "context_summary": "JWT auth complete. /register and /login done. Files: auth.py, models.py, main.py. HS256 signing with python-jose.",
-  "revised_plan": "1. GET /me protected route (current)\n2. Token expiry + refresh\n3. Integration tests\n4. Rate limiting",
-  "priority_focus": "Reuse existing JWT middleware in auth.py — it handles all edge cases already"
-}
-```
-
-**Session 2** — fresh Claude Code instance, same command, instant context:
-
-```bash
-curl -s http://localhost:8000/history/myapi-20260607
-# Returns all prior checkpoints with what the planner recommended each time
-```
-
-The [dashboard](http://localhost:8000/) shows the full project timeline.
 
 ---
 
 ## API
 
-### `POST /sync` — submit a checkpoint, receive a plan
+### `POST /sync` — checkpoint + plan
 
-| Field | Type | Description |
-|-------|------|-------------|
-| `project_id` | string | Unique project identifier (auto-generated if empty) |
-| `timestamp` | string | ISO 8601, auto-filled if empty |
-| `user_goal` | string | The overarching goal for this project |
-| `current_task` | string | The specific task being started or just completed |
-| `progress_summary` | string | What has been done toward `user_goal` |
-| `current_state` | object | `files_modified`, `code_summary`, `architecture_notes` |
-| `blockers` | array | Current blockers (empty array is fine) |
-| `next_intended_action` | string | What you were about to do next |
+Submit a checkpoint; receive a plan. This is the primary endpoint.
 
-Returns a `PlannerOutput`:
+**Request body:**
 
-| Field | Description |
-|-------|-------------|
-| `next_instruction` | Authoritative next action — follow this over your own plan |
-| `context_summary` | Where the project stands right now |
-| `revised_plan` | Step-by-step plan from this point forward |
-| `priority_focus` | The single most important constraint this session |
-
-### `GET /health`
-
-```bash
-curl http://localhost:8000/health
-# {"status": "ok", "service": "context-bridge"}
+```json
+{
+  "project_id": "myapi-20260610",
+  "user_goal": "Build JWT authentication for the API",
+  "current_task": "Implement /login endpoint",
+  "progress_summary": "FastAPI skeleton done. /register works with bcrypt.",
+  "current_state": {
+    "files_modified": ["main.py", "auth.py"],
+    "code_summary": "SQLite + FastAPI. /register tested.",
+    "architecture_notes": "HS256 JWT via python-jose"
+  },
+  "blockers": [],
+  "next_intended_action": "Write POST /login handler"
+}
 ```
+
+**Response (`SyncResponse`):**
+
+```json
+{
+  "next_instruction": "Implement /login: verify bcrypt hash, sign HS256 token with SECRET_KEY from env, return {access_token, token_type: 'bearer'}.",
+  "context_summary": "Auth API 60% done. /register works. /login is the blocker.",
+  "revised_plan": "1. /login\n2. GET /me\n3. Token expiry\n4. Tests",
+  "priority_focus": "SECRET_KEY from env — never hardcode it",
+  "source": "anthropic",
+  "stagnation_count": 1
+}
+```
+
+### `POST /checkpoint` — store only
+
+Stores a checkpoint without running the planner. Returns `{project_id, stagnation_count}`.
+
+### `GET /history/{project_id}?limit=50`
+
+Returns last N checkpoints (max 100), newest first. Each includes `_planner_output`.
 
 ### `GET /projects`
 
-```bash
-curl http://localhost:8000/projects
-# [{"project_id": "myapi-20260607", "checkpoint_count": 7, "last_active": "..."}]
+Lists all project IDs with checkpoint count and last active timestamp.
+
+### `GET /health`
+
+```json
+{"status": "ok", "service": "context-bridge", "port": 7723}
 ```
 
-### `GET /history/{project_id}`
+---
 
-```bash
-curl http://localhost:8000/history/myapi-20260607
-# Last 50 checkpoints, newest first, each including the planner output
-```
+## Config
+
+All settings load from environment variables or `~/.context-bridge/.env`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ANTHROPIC_API_KEY` | `None` | Enables Anthropic planner tier |
+| `OLLAMA_HOST` | `None` | e.g. `http://localhost:11434` |
+| `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Ollama model name |
+| `DB_PATH` | `~/.context-bridge/checkpoints.db` | SQLite database location |
+| `SERVER_PORT` | `7723` | Backend port |
 
 ---
 
 ## How it works
 
 ```
-Claude Code
+Session start
     │
-    │  POST /sync  (Checkpoint JSON)
+    │  SessionStart hook → GET /history/{project_id}?limit=1
     ▼
-Context Bridge backend
-    ├── fetches last 10 checkpoints for project (history)
-    ├── runs planner:
-    │     Anthropic API  → if ANTHROPIC_API_KEY set
-    │     Ollama         → if running at localhost:11434  (free)
-    │     rule-based     → stagnation + blocker detection (no LLM needed)
-    ├── attaches planner output to checkpoint
-    ├── saves to SQLite (~/.context-bridge/context_bridge.db)
-    └── returns PlannerOutput
+Claude receives last checkpoint context automatically
+
+During session
     │
-    │  { next_instruction, context_summary, revised_plan, priority_focus }
+    │  After every Task tool call:
+    │    git diff --stat HEAD + git log --oneline -5
+    │    POST /sync → stagnation check → planner → plan stored
+    │
+    │  Every 5th tool call:
+    │    GET /history/{project_id}?limit=1
+    │    Alert if priority_focus changed
     ▼
-Claude Code executes next_instruction
+
+Backend (sqlite at ~/.context-bridge/checkpoints.db)
+    ├── Stagnation tracking: increments count on consecutive same task
+    ├── Planner: Anthropic → Ollama → rule-based
+    └── Response: next_instruction + source + stagnation_count
 ```
 
-The rule-based planner (no LLM) detects when Claude Code is stuck: if the same task appears in 3+ consecutive checkpoints, it overrides `next_intended_action` with instructions to break it down. Recurring blockers across sessions are flagged and surfaced as `priority_focus`.
+The web dashboard at `http://localhost:7723/` shows the full project timeline with
+stagnation warnings, planner outputs, and file history.
 
 ---
 
-## Why Context Bridge
+## Why the rule-based planner is useful without an API key
 
-| Feature | Context Bridge | No memory tool |
-|---------|:-:|:-:|
-| Persists context across sessions | ✅ | ❌ |
-| Works without an API key | ✅ | — |
-| AI-powered replanning | ✅ optional | — |
-| Detects stagnation / loops | ✅ | — |
-| Local-first (your data, your machine) | ✅ | — |
-| Web dashboard | ✅ | — |
-| Single command install | ✅ | — |
+The rule-based planner:
+- Detects stagnation: same task (normalized) in 3+ consecutive checkpoints → forces decomposition
+- Detects recurring blockers: same blocker across sessions → surfaces and escalates
+- Works offline, zero latency, zero cost
+- No hallucination — deterministic output
+
+The stagnation check uses a persistent `stagnation_count` field stored in SQLite with
+token-normalized string comparison. Incrementing on each identical task submission,
+resetting on any task change.
 
 ---
 
