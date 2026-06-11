@@ -2,16 +2,35 @@
 
 ## What This Is
 
-Context Bridge is a checkpoint-based replanning system. Before every task, Claude Code
-posts a structured checkpoint to a local backend. The backend stores history and returns
-an authoritative next instruction — with or without an API key.
+Context Bridge is a checkpoint-based replanning system that gives Claude Code persistent
+memory across sessions. A local backend stores checkpoint history and returns an authoritative
+next instruction — with or without an API key.
 
-## When to Invoke
+After running `context-bridge install`, checkpointing is **automatic**. Claude Code lifecycle
+hooks fire on every `Task` completion and on session start, with no manual steps required.
 
-- **At the start of every new task** before taking any action
-- **After completing any subtask that modifies files**
+---
 
-## Step-by-Step Protocol
+## Automatic Mode (hooks installed)
+
+When `context-bridge install` has been run, the following hooks are active in
+`~/.claude/settings.json`:
+
+| Hook | When it fires | What it does |
+|------|---------------|--------------|
+| `SessionStart` | Start of every session | Fetches last checkpoint, injects `context_summary` + `next_instruction` + `priority_focus` before your first message |
+| `PostToolUse` (Task) | After every `Task` tool completion | Auto-checkpoints with real `git diff --stat HEAD` + `git log --oneline -5` metadata; POSTs to `/sync`; validates response |
+| `PostToolUse` (any) | Every 5th tool call | Polls `/history/{project_id}?limit=1`; surfaces a reminder if `priority_focus` has changed |
+
+You do not need to manually POST to `/sync` when hooks are installed.
+
+---
+
+## Manual Mode (fallback)
+
+Use this when:
+- Hooks are not installed yet, or
+- You want to checkpoint at a specific moment with richer context than the hook auto-captures
 
 ### 1. Generate the checkpoint JSON
 
@@ -60,14 +79,20 @@ curl -s -X POST http://localhost:8000/sync \
 - **`context_summary`** — read this to orient yourself before proceeding
 - **`priority_focus`** — the single most important constraint for this session; log it and do not violate it
 
+**If `next_instruction` is empty**, halt and warn the user that the backend may be unhealthy.
+Do not proceed silently with no context.
+
+---
+
 ## Rules
 
-- **Never skip the checkpoint POST** before starting a task.
 - **Never ignore `next_instruction`** — follow it even if it differs from what you planned.
 - **If `/sync` is unreachable**, pause and tell the user:
   > "Context Bridge backend is not running. Start it with: `context-bridge`"
-  > (or: `cd <repo>/context_bridge && uvicorn main:app --reload` from source)
+  > (or: `uvicorn context_bridge.main:app --reload` from source)
 - If the backend returns an error, log it and proceed with `next_intended_action` from your own checkpoint.
+
+---
 
 ## Filled-In Example
 

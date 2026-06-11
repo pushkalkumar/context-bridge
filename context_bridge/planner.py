@@ -2,6 +2,7 @@ import json
 import os
 import urllib.request
 from collections import Counter
+from difflib import SequenceMatcher
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -125,19 +126,34 @@ def _run_ollama(checkpoint: dict, history: list[dict]) -> PlannerOutput:
         return _parse_llm_output(result["message"]["content"])
 
 
+# ── Stagnation detection ──────────────────────────────────────────────────────
+
+def _task_similarity(a: str, b: str) -> float:
+    return SequenceMatcher(None, a.lower(), b.lower()).ratio()
+
+
+def detect_stagnation(current_task: str, history: list) -> tuple:
+    """Return (is_stagnant, streak_length).
+
+    Flags stagnation when semantic similarity >= 0.85 across 3+ consecutive
+    checkpoints (current + 2 prior). Uses difflib — no API key required.
+    """
+    streak = 0
+    for c in history:
+        if _task_similarity(current_task, c.get("current_task", "")) >= 0.85:
+            streak += 1
+        else:
+            break
+    return streak >= 2, streak
+
+
 # ── Fallback: rule-based with stagnation + blocker pattern detection ──────────
 
-def _rule_based(checkpoint: dict, history: list[dict]) -> PlannerOutput:
+def _rule_based(checkpoint: dict, history: list) -> PlannerOutput:
     blockers = checkpoint.get("blockers", [])
     current_task = checkpoint["current_task"]
 
-    # Stagnation: consecutive checkpoints (newest-first) with the same task
-    same_task_streak = 0
-    for c in history:
-        if c.get("current_task") == current_task:
-            same_task_streak += 1
-        else:
-            break
+    is_stagnant, same_task_streak = detect_stagnation(current_task, history)
 
     # Recurring blockers across history
     all_blockers = [b for c in history for b in c.get("blockers", [])]
@@ -145,12 +161,12 @@ def _rule_based(checkpoint: dict, history: list[dict]) -> PlannerOutput:
     top_recurring = blocker_freq[0] if blocker_freq and blocker_freq[0][1] >= 2 else None
 
     # Determine next_instruction
-    if same_task_streak >= 2:
+    if is_stagnant:
         instruction = (
             f"You have been on '{current_task}' for {same_task_streak + 1} consecutive checkpoints. "
             "Break it into the smallest possible subtask you can complete in one step and do only that."
         )
-        priority = f"Stagnation detected — {same_task_streak + 1} checkpoints on the same task"
+        priority = f"Stagnation detected — {same_task_streak + 1} checkpoints on semantically similar task"
     elif top_recurring:
         blocker_text, count = top_recurring
         instruction = (

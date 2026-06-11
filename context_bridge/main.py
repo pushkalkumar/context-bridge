@@ -68,5 +68,5 @@ async def projects():
 
 
 @app.get("/history/{project_id}")
-async def history(project_id: str):
-    return get_recent_checkpoints(project_id, n=50)
+async def history(project_id: str, limit: int = 50):
+    return get_recent_checkpoints(project_id, n=min(limit, 100))
