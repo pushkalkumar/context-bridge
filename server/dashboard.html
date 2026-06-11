@@ -10,21 +10,19 @@
   --bg:#0d1117;--surface:#161b22;--border:#21262d;
   --text:#c9d1d9;--muted:#8b949e;--bright:#e6edf3;
   --blue:#58a6ff;--green:#3fb950;--yellow:#d29922;
-  --red:#f85149;--purple:#bc8cff;
+  --red:#f85149;--purple:#bc8cff;--orange:#f0883e;
 }
 body{font-family:'Menlo','Monaco','Consolas',monospace;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;font-size:13px}
 a{color:var(--blue);text-decoration:none}
 
-/* header */
 header{padding:10px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;flex-shrink:0}
 header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
 #hdr-status{font-size:11px;color:var(--muted)}
 #hdr-planner{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border)}
+#hdr-stats{font-size:11px;color:var(--muted);margin-left:auto}
 
-/* layout */
 .layout{display:flex;flex:1;overflow:hidden}
 
-/* sidebar */
 .sidebar{width:260px;border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
 .sidebar-hdr{padding:10px 14px 6px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border)}
 .project-list{overflow-y:auto;flex:1}
@@ -32,25 +30,30 @@ header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
 .project-item:hover{background:var(--surface)}
 .project-item.active{background:var(--surface);border-left-color:var(--blue)}
 .proj-name{color:var(--bright);font-size:12px;display:flex;align-items:center;gap:6px}
-.proj-meta{color:var(--muted);font-size:11px;margin-top:3px}
+.proj-meta{color:var(--muted);font-size:11px;margin-top:3px;display:flex;gap:6px;align-items:center}
 .dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
 .dot-green{background:var(--green)}.dot-yellow{background:var(--yellow)}.dot-gray{background:#484f58}
-.stag-badge{font-size:9px;padding:1px 5px;border-radius:3px;background:#5a1e02;color:var(--yellow);flex-shrink:0}
+.stag-badge{font-size:9px;padding:1px 5px;border-radius:3px;background:#5a1e02;color:var(--yellow)}
+.src-badge{font-size:9px;padding:1px 5px;border-radius:3px;border:1px solid var(--border);color:var(--muted)}
+.src-anthropic{border-color:#7c3aed;color:#a78bfa}
+.src-ollama{border-color:#065f46;color:#34d399}
 
-/* main content */
 .content{flex:1;overflow-y:auto;padding:20px 24px}
 .empty{text-align:center;color:var(--muted);margin-top:100px;line-height:2}
 
-/* section header */
-.section-hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.section-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
 .section-hdr h2{font-size:13px;color:var(--muted);font-weight:400}
+.section-hdr-right{display:flex;gap:8px;align-items:center}
 .section-hdr span{font-size:11px;color:var(--muted)}
+.btn{font-size:11px;padding:3px 10px;border-radius:4px;border:1px solid var(--border);background:var(--surface);color:var(--muted);cursor:pointer;font-family:inherit}
+.btn:hover{border-color:var(--blue);color:var(--blue)}
 
-/* checkpoint card */
 .card{border:1px solid var(--border);border-radius:6px;margin-bottom:14px;overflow:hidden}
+.card.stagnant{border-color:#5a3e00}
 .card-hdr{padding:9px 14px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px}
 .card-task{color:var(--bright);font-size:12px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.card-ts{color:var(--muted);font-size:10px;flex-shrink:0}
+.card-meta{display:flex;gap:6px;align-items:center;flex-shrink:0}
+.card-ts{color:var(--muted);font-size:10px}
 .card-body{padding:12px 14px;display:grid;gap:8px}
 .field{display:grid;gap:3px}
 .field-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
@@ -59,21 +62,18 @@ header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
 .file-tag{font-size:10px;padding:2px 6px;background:#0d2044;color:var(--blue);border-radius:3px;border:1px solid #1f3a6e}
 .blockers{color:var(--red);font-size:12px}
 
-/* planner box */
 .planner{margin-top:4px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;display:grid;gap:6px}
+.planner-hdr{display:flex;align-items:center;gap:6px}
 .planner-lbl{font-size:10px;color:var(--blue);text-transform:uppercase;letter-spacing:1px}
 .p-instruction{color:var(--green);font-size:12px;line-height:1.5}
 .p-priority{color:var(--yellow);font-size:11px}
-.p-plan{color:var(--muted);font-size:11px;line-height:1.4}
+.p-plan{color:var(--muted);font-size:11px;line-height:1.4;white-space:pre-wrap}
 
-/* stagnation warning */
 .stag-warn{padding:10px 14px;background:#1a0e00;border:1px solid #5a3e00;border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--yellow)}
 
-/* loading / error */
 .loading{color:var(--muted);font-size:12px;padding:20px 0}
 .err{color:var(--red);font-size:12px;padding:20px 0}
 
-/* scrollbar */
 ::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
 </style>
 </head>
@@ -82,6 +82,7 @@ header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
   <h1>CONTEXT BRIDGE</h1>
   <span id="hdr-status">connecting...</span>
   <span id="hdr-planner"></span>
+  <span id="hdr-stats"></span>
 </header>
 <div class="layout">
   <div class="sidebar">
@@ -92,9 +93,8 @@ header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
   </div>
   <div class="content" id="content">
     <div class="empty">
-      Select a project to view checkpoint history.<br>
-      No projects yet? Start a task with Claude Code<br>
-      and it will POST the first checkpoint to <code>/sync</code>.
+      Select a project.<br>
+      No projects yet? Start Claude Code and it will checkpoint automatically.
     </div>
   </div>
 </div>
@@ -103,7 +103,6 @@ header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
 'use strict';
 let activeId = null;
 
-// ── time helpers ─────────────────────────────────────────────────────────────
 function timeAgo(ts) {
   const s = (Date.now() - new Date(ts).getTime()) / 1000;
   if (s < 60) return 'just now';
@@ -111,33 +110,33 @@ function timeAgo(ts) {
   if (s < 86400) return Math.floor(s / 3600) + 'h ago';
   return Math.floor(s / 86400) + 'd ago';
 }
+
 function dotClass(ts) {
   const s = (Date.now() - new Date(ts).getTime()) / 1000;
-  if (s < 3600) return 'dot-green';
-  if (s < 86400) return 'dot-yellow';
-  return 'dot-gray';
+  return s < 3600 ? 'dot-green' : s < 86400 ? 'dot-yellow' : 'dot-gray';
 }
 
-// ── stagnation detection ─────────────────────────────────────────────────────
-function detectStagnation(checkpoints) {
-  if (checkpoints.length < 3) return null;
-  const task = checkpoints[0].current_task;
-  let streak = 0;
-  for (const c of checkpoints) {
-    if (c.current_task === task) streak++;
-    else break;
-  }
-  return streak >= 3 ? { task, streak } : null;
+function srcBadge(source) {
+  if (!source) return '';
+  const cls = source === 'anthropic' ? 'src-anthropic' : source === 'ollama' ? 'src-ollama' : '';
+  return `<span class="src-badge ${cls}">${source}</span>`;
 }
 
-// ── escaping ─────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s || '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+    .replace(/"/g,'&quot;');
 }
 
-// ── projects sidebar ─────────────────────────────────────────────────────────
+async function loadStats() {
+  try {
+    const r = await fetch('/stats');
+    const s = await r.json();
+    document.getElementById('hdr-stats').textContent =
+      `${s.total_checkpoints} checkpoints · ${s.stagnation_events} stagnation${s.stagnation_events !== 1 ? 's' : ''}`;
+  } catch {}
+}
+
 async function loadProjects() {
   let projects;
   try {
@@ -158,7 +157,8 @@ async function loadProjects() {
   }
 
   el.innerHTML = projects.map(p => {
-    const stag = p.checkpoint_count >= 3 ? '' : ''; // full stagnation check requires history
+    const stagBadge = p.stagnation_count >= 3
+      ? `<span class="stag-badge">stagnant</span>` : '';
     return `
       <div class="project-item${activeId === p.project_id ? ' active' : ''}"
            id="proj-${esc(p.project_id)}"
@@ -166,20 +166,21 @@ async function loadProjects() {
         <div class="proj-name">
           <span class="dot ${dotClass(p.last_active)}"></span>
           ${esc(p.project_id)}
+          ${stagBadge}
         </div>
-        <div class="proj-meta">${p.checkpoint_count} checkpoints · ${timeAgo(p.last_active)}</div>
+        <div class="proj-meta">
+          ${p.checkpoint_count} checkpoints
+          <span>·</span>
+          ${timeAgo(p.last_active)}
+        </div>
       </div>`;
   }).join('');
 
-  // Auto-select first project on initial load
   if (!activeId && projects.length) loadHistory(projects[0].project_id);
 }
 
-// ── checkpoint history ────────────────────────────────────────────────────────
 async function loadHistory(projectId) {
-  if (activeId) {
-    document.getElementById('proj-' + activeId)?.classList.remove('active');
-  }
+  document.getElementById('proj-' + activeId)?.classList.remove('active');
   activeId = projectId;
   document.getElementById('proj-' + projectId)?.classList.add('active');
 
@@ -189,9 +190,14 @@ async function loadHistory(projectId) {
   let checkpoints;
   try {
     const r = await fetch('/history/' + encodeURIComponent(projectId));
+    if (!r.ok) {
+      const err = await r.json();
+      content.innerHTML = `<div class="err">${esc(err.message || 'Failed to load.')}</div>`;
+      return;
+    }
     checkpoints = await r.json();
   } catch (e) {
-    content.innerHTML = `<div class="err">Failed to load history: ${esc(e.message)}</div>`;
+    content.innerHTML = `<div class="err">Failed to load: ${esc(e.message)}</div>`;
     return;
   }
 
@@ -200,18 +206,24 @@ async function loadHistory(projectId) {
     return;
   }
 
-  const stag = detectStagnation(checkpoints);
-  const goal = checkpoints[0].user_goal;
+  // Use server-side stagnation_count from the latest checkpoint
+  const latest = checkpoints[0];
+  const stagnant = (latest.stagnation_count || 0) >= 3;
+  const goal = latest.user_goal;
 
   content.innerHTML = `
     <div class="section-hdr">
       <h2>${esc(projectId)}</h2>
-      <span>${esc(goal)}</span>
+      <div class="section-hdr-right">
+        <span>${esc(goal)}</span>
+        <button class="btn" onclick="exportProject('${esc(projectId)}')">export</button>
+        <button class="btn" style="color:var(--red)" onclick="deleteProject('${esc(projectId)}')">delete</button>
+      </div>
     </div>
-    ${stag ? `
+    ${stagnant ? `
     <div class="stag-warn">
-      ⚠ Stagnation: <strong>${esc(stag.task)}</strong> has appeared in ${stag.streak} consecutive checkpoints.
-      Consider breaking it into a smaller subtask.
+      Stagnation: <strong>${esc(latest.current_task)}</strong> has appeared
+      ${latest.stagnation_count} times in a row. Break it into a smaller subtask.
     </div>` : ''}
     ${checkpoints.map(renderCard).join('')}
   `;
@@ -222,12 +234,16 @@ function renderCard(cp) {
   const blockers = cp.blockers || [];
   const planner = cp._planner_output;
   const ts = new Date(cp.timestamp);
+  const stagnant = (cp.stagnation_count || 0) >= 3;
 
   return `
-    <div class="card">
+    <div class="card${stagnant ? ' stagnant' : ''}">
       <div class="card-hdr">
         <div class="card-task" title="${esc(cp.current_task)}">${esc(cp.current_task)}</div>
-        <div class="card-ts">${ts.toLocaleString()}</div>
+        <div class="card-meta">
+          ${stagnant ? '<span class="stag-badge">stagnant</span>' : ''}
+          <span class="card-ts">${ts.toLocaleString()}</span>
+        </div>
       </div>
       <div class="card-body">
         <div class="field">
@@ -236,7 +252,7 @@ function renderCard(cp) {
         </div>
         ${files.length ? `
         <div class="field">
-          <div class="field-lbl">Files Modified</div>
+          <div class="field-lbl">Files</div>
           <div class="files">${files.map(f => `<span class="file-tag">${esc(f)}</span>`).join('')}</div>
         </div>` : ''}
         ${blockers.length ? `
@@ -246,31 +262,53 @@ function renderCard(cp) {
         </div>` : ''}
         ${planner ? `
         <div class="planner">
-          <div class="planner-lbl">Planner Output</div>
-          <div class="p-instruction">→ ${esc(planner.next_instruction)}</div>
-          ${planner.priority_focus ? `<div class="p-priority">⚡ ${esc(planner.priority_focus)}</div>` : ''}
+          <div class="planner-hdr">
+            <div class="planner-lbl">Planner</div>
+            ${srcBadge(planner.source)}
+          </div>
+          <div class="p-instruction">${esc(planner.next_instruction)}</div>
+          ${planner.priority_focus ? `<div class="p-priority">${esc(planner.priority_focus)}</div>` : ''}
           ${planner.revised_plan ? `<div class="p-plan">${esc(planner.revised_plan)}</div>` : ''}
         </div>` : ''}
       </div>
     </div>`;
 }
 
-// ── planner indicator ─────────────────────────────────────────────────────────
-async function checkPlannerMode() {
-  try {
-    // Try a dummy /sync to see what mode we're in — instead just check if we can fetch /health
-    const r = await fetch('/health');
-    if (r.ok) {
-      document.getElementById('hdr-planner').textContent = '● backend ok';
-      document.getElementById('hdr-planner').style.color = 'var(--green)';
-    }
-  } catch { /* silent */ }
+async function exportProject(projectId) {
+  window.open('/projects/' + encodeURIComponent(projectId) + '/export', '_blank');
 }
 
-// ── init ──────────────────────────────────────────────────────────────────────
+async function deleteProject(projectId) {
+  if (!confirm(`Delete all checkpoints for "${projectId}"?`)) return;
+  try {
+    const r = await fetch('/projects/' + encodeURIComponent(projectId), { method: 'DELETE' });
+    if (r.ok) {
+      activeId = null;
+      document.getElementById('content').innerHTML =
+        '<div class="empty">Project deleted.</div>';
+      loadProjects();
+    }
+  } catch (e) {
+    alert('Delete failed: ' + e.message);
+  }
+}
+
+async function checkPlanner() {
+  try {
+    const r = await fetch('/health');
+    if (r.ok) {
+      const d = await r.json();
+      const el = document.getElementById('hdr-planner');
+      el.textContent = 'backend ok';
+      el.style.color = 'var(--green)';
+    }
+  } catch {}
+}
+
 loadProjects();
-checkPlannerMode();
-setInterval(loadProjects, 15000);
+loadStats();
+checkPlanner();
+setInterval(() => { loadProjects(); loadStats(); }, 15000);
 </script>
 </body>
 </html>
