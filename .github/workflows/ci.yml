@@ -7,11 +7,11 @@ on:
     branches: [main]
 
 jobs:
-  build:
+  test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.9", "3.11", "3.12"]
+        python-version: ["3.11", "3.12", "3.13"]
 
     steps:
       - uses: actions/checkout@v4
@@ -20,35 +20,109 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Install package
-        run: pip install -e .
+      - name: Install package with dev dependencies
+        run: pip install -e ".[dev]"
 
       - name: Verify imports
         run: |
           python -c "
-          from context_bridge.main import app
-          from context_bridge.planner import run_planner, build_prompt
-          from context_bridge.memory import init_db, save_checkpoint, get_recent_checkpoints, get_all_projects
-          from context_bridge.models import Checkpoint, PlannerOutput
-          from context_bridge.cli import main
+          from server.main import app, run
+          from server.planner import run_planner, _rule_based
+          from server.memory import init_db, save_checkpoint, get_recent_checkpoints, compute_stagnation_count
+          from server.models import CheckpointIn, SyncResponse
+          from server.config import settings
+          import server.hook as hook
           print('All imports OK')
           "
 
-      - name: Verify rule-based planner (no API key)
+      - name: Run pytest
+        run: pytest -v
+
+      - name: Verify server starts (smoke test)
         run: |
           python -c "
-          from context_bridge.planner import _rule_based
-          cp = {
-              'project_id': 'test',
+          from server.main import app
+          from fastapi.testclient import TestClient
+          from server.memory import init_db
+          init_db()
+          client = TestClient(app)
+
+          r = client.get('/health')
+          assert r.status_code == 200
+          assert r.json()['status'] == 'ok'
+
+          r = client.post('/sync', json={
               'user_goal': 'Build something',
               'current_task': 'Set up project',
               'progress_summary': 'Nothing yet',
-              'current_state': {'files_modified': [], 'code_summary': '', 'architecture_notes': ''},
               'blockers': [],
               'next_intended_action': 'Create main.py',
-          }
-          result = _rule_based(cp, [])
-          assert result.next_instruction
-          assert result.context_summary
-          print('Rule-based planner OK:', result.next_instruction)
+          })
+          assert r.status_code == 200
+          data = r.json()
+          assert data['next_instruction']
+          assert data['source'] in ('anthropic', 'ollama', 'rule-based')
+          assert 'stagnation_count' in data
+          print('Smoke test OK — source:', data['source'])
+          "
+
+      - name: Verify stagnation tracking
+        run: |
+          python -c "
+          from server.memory import compute_stagnation_count, init_db, save_checkpoint
+          from datetime import datetime, timezone
+          init_db()
+
+          pid = 'ci-stagnation-test'
+          task = 'Fix the login bug'
+
+          def cp(t, count):
+              return {
+                  'project_id': pid, 'timestamp': datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%S'),
+                  'user_goal': 'test', 'current_task': t, 'progress_summary': 'x',
+                  'current_state': {}, 'blockers': [], 'next_intended_action': '',
+                  'stagnation_count': count,
+              }
+
+          # Fresh project — first occurrence = count 1
+          c1 = compute_stagnation_count(pid, task)
+          assert c1 == 1, f'Expected 1, got {c1}'
+          save_checkpoint(cp(task, c1))
+
+          # Same task — count increments
+          c2 = compute_stagnation_count(pid, task)
+          assert c2 == 2, f'Expected 2, got {c2}'
+          save_checkpoint(cp(task, c2))
+
+          # Same task again — count 3, triggers stagnation
+          c3 = compute_stagnation_count(pid, task)
+          assert c3 == 3, f'Expected 3, got {c3}'
+
+          # Different task — resets to 1
+          c4 = compute_stagnation_count(pid, 'Deploy to production')
+          assert c4 == 1, f'Expected reset to 1, got {c4}'
+
+          print('Stagnation tracking OK')
+          "
+
+      - name: Verify hook script
+        run: |
+          python -c "
+          import sys, io
+          import server.hook as h
+
+          assert callable(h.main)
+          assert callable(h._validate)
+          assert callable(h._git_meta)
+
+          # Empty next_instruction fails validation
+          old = sys.stderr; sys.stderr = io.StringIO()
+          assert not h._validate({'next_instruction': ''})
+          sys.stderr = old
+
+          # Non-empty passes
+          assert h._validate({'next_instruction': 'Do the thing'})
+          assert not h._validate(None)
+
+          print('Hook script OK')
           "
