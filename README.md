@@ -27,7 +27,7 @@ Session 2 starts:
     Priority: SECRET_KEY must come from env — it was hardcoded in auth.py:34 last session
 ```
 
-Zero re-orientation. Claude picks up exactly where it left off.
+Claude picks up exactly where it left off.
 
 ---
 
@@ -119,7 +119,21 @@ Returns last N checkpoints (max 100), newest first. Each includes `_planner_outp
 
 ### `GET /projects`
 
-Lists all project IDs with checkpoint count and last active timestamp.
+Lists all project IDs with checkpoint count, last active timestamp, and current stagnation count.
+
+### `GET /stats`
+
+```json
+{"total_projects": 4, "total_checkpoints": 38, "stagnation_events": 2}
+```
+
+### `DELETE /projects/{project_id}`
+
+Deletes all checkpoints for a project. Returns `{"deleted": N}`.
+
+### `GET /projects/{project_id}/export`
+
+Downloads all checkpoints as a JSON file.
 
 ### `GET /health`
 
@@ -183,8 +197,8 @@ The rule-based planner:
 - No hallucination — deterministic output
 
 The stagnation check uses a persistent `stagnation_count` field stored in SQLite with
-token-normalized string comparison. Incrementing on each identical task submission,
-resetting on any task change.
+token-normalized string comparison. The count increments each time the same task is
+submitted consecutively, and resets to 1 when the task changes.
 
 ---
 
