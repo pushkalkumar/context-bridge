@@ -1,0 +1,276 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Context Bridge</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#0d1117;--surface:#161b22;--border:#21262d;
+  --text:#c9d1d9;--muted:#8b949e;--bright:#e6edf3;
+  --blue:#58a6ff;--green:#3fb950;--yellow:#d29922;
+  --red:#f85149;--purple:#bc8cff;
+}
+body{font-family:'Menlo','Monaco','Consolas',monospace;background:var(--bg);color:var(--text);height:100vh;display:flex;flex-direction:column;font-size:13px}
+a{color:var(--blue);text-decoration:none}
+
+/* header */
+header{padding:10px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:16px;flex-shrink:0}
+header h1{font-size:12px;color:var(--blue);letter-spacing:2px;font-weight:700}
+#hdr-status{font-size:11px;color:var(--muted)}
+#hdr-planner{font-size:11px;padding:2px 8px;border-radius:10px;border:1px solid var(--border)}
+
+/* layout */
+.layout{display:flex;flex:1;overflow:hidden}
+
+/* sidebar */
+.sidebar{width:260px;border-right:1px solid var(--border);display:flex;flex-direction:column;flex-shrink:0}
+.sidebar-hdr{padding:10px 14px 6px;font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:1px;border-bottom:1px solid var(--border)}
+.project-list{overflow-y:auto;flex:1}
+.project-item{padding:9px 14px;cursor:pointer;border-left:2px solid transparent;transition:background .1s}
+.project-item:hover{background:var(--surface)}
+.project-item.active{background:var(--surface);border-left-color:var(--blue)}
+.proj-name{color:var(--bright);font-size:12px;display:flex;align-items:center;gap:6px}
+.proj-meta{color:var(--muted);font-size:11px;margin-top:3px}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;display:inline-block}
+.dot-green{background:var(--green)}.dot-yellow{background:var(--yellow)}.dot-gray{background:#484f58}
+.stag-badge{font-size:9px;padding:1px 5px;border-radius:3px;background:#5a1e02;color:var(--yellow);flex-shrink:0}
+
+/* main content */
+.content{flex:1;overflow-y:auto;padding:20px 24px}
+.empty{text-align:center;color:var(--muted);margin-top:100px;line-height:2}
+
+/* section header */
+.section-hdr{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:16px;padding-bottom:10px;border-bottom:1px solid var(--border)}
+.section-hdr h2{font-size:13px;color:var(--muted);font-weight:400}
+.section-hdr span{font-size:11px;color:var(--muted)}
+
+/* checkpoint card */
+.card{border:1px solid var(--border);border-radius:6px;margin-bottom:14px;overflow:hidden}
+.card-hdr{padding:9px 14px;background:var(--surface);border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;gap:8px}
+.card-task{color:var(--bright);font-size:12px;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.card-ts{color:var(--muted);font-size:10px;flex-shrink:0}
+.card-body{padding:12px 14px;display:grid;gap:8px}
+.field{display:grid;gap:3px}
+.field-lbl{font-size:10px;color:var(--muted);text-transform:uppercase;letter-spacing:.8px}
+.field-val{font-size:12px;color:var(--text);line-height:1.5}
+.files{display:flex;flex-wrap:wrap;gap:4px}
+.file-tag{font-size:10px;padding:2px 6px;background:#0d2044;color:var(--blue);border-radius:3px;border:1px solid #1f3a6e}
+.blockers{color:var(--red);font-size:12px}
+
+/* planner box */
+.planner{margin-top:4px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:4px;display:grid;gap:6px}
+.planner-lbl{font-size:10px;color:var(--blue);text-transform:uppercase;letter-spacing:1px}
+.p-instruction{color:var(--green);font-size:12px;line-height:1.5}
+.p-priority{color:var(--yellow);font-size:11px}
+.p-plan{color:var(--muted);font-size:11px;line-height:1.4}
+
+/* stagnation warning */
+.stag-warn{padding:10px 14px;background:#1a0e00;border:1px solid #5a3e00;border-radius:6px;margin-bottom:14px;font-size:12px;color:var(--yellow)}
+
+/* loading / error */
+.loading{color:var(--muted);font-size:12px;padding:20px 0}
+.err{color:var(--red);font-size:12px;padding:20px 0}
+
+/* scrollbar */
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+</style>
+</head>
+<body>
+<header>
+  <h1>CONTEXT BRIDGE</h1>
+  <span id="hdr-status">connecting...</span>
+  <span id="hdr-planner"></span>
+</header>
+<div class="layout">
+  <div class="sidebar">
+    <div class="sidebar-hdr">Projects</div>
+    <div class="project-list" id="project-list">
+      <div class="loading" style="padding:14px">Loading...</div>
+    </div>
+  </div>
+  <div class="content" id="content">
+    <div class="empty">
+      Select a project to view checkpoint history.<br>
+      No projects yet? Start a task with Claude Code<br>
+      and it will POST the first checkpoint to <code>/sync</code>.
+    </div>
+  </div>
+</div>
+
+<script>
+'use strict';
+let activeId = null;
+
+// ── time helpers ─────────────────────────────────────────────────────────────
+function timeAgo(ts) {
+  const s = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (s < 60) return 'just now';
+  if (s < 3600) return Math.floor(s / 60) + 'm ago';
+  if (s < 86400) return Math.floor(s / 3600) + 'h ago';
+  return Math.floor(s / 86400) + 'd ago';
+}
+function dotClass(ts) {
+  const s = (Date.now() - new Date(ts).getTime()) / 1000;
+  if (s < 3600) return 'dot-green';
+  if (s < 86400) return 'dot-yellow';
+  return 'dot-gray';
+}
+
+// ── stagnation detection ─────────────────────────────────────────────────────
+function detectStagnation(checkpoints) {
+  if (checkpoints.length < 3) return null;
+  const task = checkpoints[0].current_task;
+  let streak = 0;
+  for (const c of checkpoints) {
+    if (c.current_task === task) streak++;
+    else break;
+  }
+  return streak >= 3 ? { task, streak } : null;
+}
+
+// ── escaping ─────────────────────────────────────────────────────────────────
+function esc(s) {
+  return String(s || '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── projects sidebar ─────────────────────────────────────────────────────────
+async function loadProjects() {
+  let projects;
+  try {
+    const r = await fetch('/projects');
+    projects = await r.json();
+  } catch {
+    document.getElementById('hdr-status').textContent = 'backend unreachable';
+    return;
+  }
+
+  document.getElementById('hdr-status').textContent =
+    projects.length + ' project' + (projects.length !== 1 ? 's' : '');
+
+  const el = document.getElementById('project-list');
+  if (!projects.length) {
+    el.innerHTML = '<div style="padding:14px;color:var(--muted);font-size:12px">No projects yet.</div>';
+    return;
+  }
+
+  el.innerHTML = projects.map(p => {
+    const stag = p.checkpoint_count >= 3 ? '' : ''; // full stagnation check requires history
+    return `
+      <div class="project-item${activeId === p.project_id ? ' active' : ''}"
+           id="proj-${esc(p.project_id)}"
+           onclick="loadHistory('${esc(p.project_id)}')">
+        <div class="proj-name">
+          <span class="dot ${dotClass(p.last_active)}"></span>
+          ${esc(p.project_id)}
+        </div>
+        <div class="proj-meta">${p.checkpoint_count} checkpoints · ${timeAgo(p.last_active)}</div>
+      </div>`;
+  }).join('');
+
+  // Auto-select first project on initial load
+  if (!activeId && projects.length) loadHistory(projects[0].project_id);
+}
+
+// ── checkpoint history ────────────────────────────────────────────────────────
+async function loadHistory(projectId) {
+  if (activeId) {
+    document.getElementById('proj-' + activeId)?.classList.remove('active');
+  }
+  activeId = projectId;
+  document.getElementById('proj-' + projectId)?.classList.add('active');
+
+  const content = document.getElementById('content');
+  content.innerHTML = '<div class="loading">Loading...</div>';
+
+  let checkpoints;
+  try {
+    const r = await fetch('/history/' + encodeURIComponent(projectId));
+    checkpoints = await r.json();
+  } catch (e) {
+    content.innerHTML = `<div class="err">Failed to load history: ${esc(e.message)}</div>`;
+    return;
+  }
+
+  if (!checkpoints.length) {
+    content.innerHTML = '<div class="empty">No checkpoints for this project.</div>';
+    return;
+  }
+
+  const stag = detectStagnation(checkpoints);
+  const goal = checkpoints[0].user_goal;
+
+  content.innerHTML = `
+    <div class="section-hdr">
+      <h2>${esc(projectId)}</h2>
+      <span>${esc(goal)}</span>
+    </div>
+    ${stag ? `
+    <div class="stag-warn">
+      ⚠ Stagnation: <strong>${esc(stag.task)}</strong> has appeared in ${stag.streak} consecutive checkpoints.
+      Consider breaking it into a smaller subtask.
+    </div>` : ''}
+    ${checkpoints.map(renderCard).join('')}
+  `;
+}
+
+function renderCard(cp) {
+  const files = (cp.current_state?.files_modified || []).slice(0, 8);
+  const blockers = cp.blockers || [];
+  const planner = cp._planner_output;
+  const ts = new Date(cp.timestamp);
+
+  return `
+    <div class="card">
+      <div class="card-hdr">
+        <div class="card-task" title="${esc(cp.current_task)}">${esc(cp.current_task)}</div>
+        <div class="card-ts">${ts.toLocaleString()}</div>
+      </div>
+      <div class="card-body">
+        <div class="field">
+          <div class="field-lbl">Progress</div>
+          <div class="field-val">${esc(cp.progress_summary)}</div>
+        </div>
+        ${files.length ? `
+        <div class="field">
+          <div class="field-lbl">Files Modified</div>
+          <div class="files">${files.map(f => `<span class="file-tag">${esc(f)}</span>`).join('')}</div>
+        </div>` : ''}
+        ${blockers.length ? `
+        <div class="field">
+          <div class="field-lbl">Blockers</div>
+          <div class="blockers">${blockers.map(esc).join('<br>')}</div>
+        </div>` : ''}
+        ${planner ? `
+        <div class="planner">
+          <div class="planner-lbl">Planner Output</div>
+          <div class="p-instruction">→ ${esc(planner.next_instruction)}</div>
+          ${planner.priority_focus ? `<div class="p-priority">⚡ ${esc(planner.priority_focus)}</div>` : ''}
+          ${planner.revised_plan ? `<div class="p-plan">${esc(planner.revised_plan)}</div>` : ''}
+        </div>` : ''}
+      </div>
+    </div>`;
+}
+
+// ── planner indicator ─────────────────────────────────────────────────────────
+async function checkPlannerMode() {
+  try {
+    // Try a dummy /sync to see what mode we're in — instead just check if we can fetch /health
+    const r = await fetch('/health');
+    if (r.ok) {
+      document.getElementById('hdr-planner').textContent = '● backend ok';
+      document.getElementById('hdr-planner').style.color = 'var(--green)';
+    }
+  } catch { /* silent */ }
+}
+
+// ── init ──────────────────────────────────────────────────────────────────────
+loadProjects();
+checkPlannerMode();
+setInterval(loadProjects, 15000);
+</script>
+</body>
+</html>

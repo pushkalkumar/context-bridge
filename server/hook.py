@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+Context Bridge lifecycle hook for Claude Code.
+
+Installed to ~/.claude/context-bridge-hook.py by `context-bridge install`.
+Pure stdlib — no external dependencies.
+
+Handles:
+  SessionStart  — inject last checkpoint context before first message
+  PostToolUse   — auto-checkpoint on Task completion (with git diff)
+                — poll priority change every 5 tool calls
+"""
+import json
+import os
+import subprocess
+import sys
+import urllib.error
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+BASE_URL = os.environ.get("CONTEXT_BRIDGE_URL", "http://127.0.0.1:7723")
+_STATE_DIR = Path("/tmp/context-bridge-hooks")
+
+
+# ── Session state ─────────────────────────────────────────────────────────────
+
+def _sp(sid: str, key: str) -> Path:
+    _STATE_DIR.mkdir(parents=True, exist_ok=True)
+    return _STATE_DIR / f"{sid[:20]}_{key}.txt"
+
+
+def _read(sid: str, key: str, default: str = "") -> str:
+    p = _sp(sid, key)
+    return p.read_text().strip() if p.exists() else default
+
+
+def _write(sid: str, key: str, value: str) -> None:
+    _sp(sid, key).write_text(str(value))
+
+
+# ── Project ID ────────────────────────────────────────────────────────────────
+
+def _project_id() -> str:
+    try:
+        remote = subprocess.check_output(
+            ["git", "remote", "get-url", "origin"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        name = remote.rstrip("/").split("/")[-1].removesuffix(".git")
+    except Exception:
+        name = Path.cwd().name
+    return f"{name}-{datetime.now(timezone.utc).strftime('%Y%m%d')}"
+
+
+# ── Git metadata ──────────────────────────────────────────────────────────────
+
+def _git_meta() -> dict:
+    meta: dict = {}
+    try:
+        meta["git_diff_stat"] = subprocess.check_output(
+            ["git", "diff", "--stat", "HEAD"], stderr=subprocess.DEVNULL, text=True,
+        ).strip() or "(no uncommitted changes)"
+        meta["git_log_recent"] = subprocess.check_output(
+            ["git", "log", "--oneline", "-5"], stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+    except Exception:
+        # Not a git repo — mtime scan for files changed in last hour
+        try:
+            cwd = Path.cwd()
+            cutoff = datetime.now().timestamp() - 3600
+            meta["recent_files_mtime"] = sorted(
+                (
+                    str(p.relative_to(cwd))
+                    for p in cwd.rglob("*")
+                    if p.is_file()
+                    and p.stat().st_mtime > cutoff
+                    and not any(part.startswith(".") for part in p.parts)
+                ),
+                key=lambda f: (cwd / f).stat().st_mtime,
+                reverse=True,
+            )[:20]
+        except Exception:
+            pass
+    return meta
+
+
+# ── HTTP ──────────────────────────────────────────────────────────────────────
+
+def _get(path: str):
+    try:
+        with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=5) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def _post(path: str, payload: dict):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"{BASE_URL}{path}", data=data,
+        headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+# ── Response contract ─────────────────────────────────────────────────────────
+
+def _validate(response) -> bool:
+    if not response:
+        return False
+    if not (response.get("next_instruction") or "").strip():
+        print(
+            "[context-bridge] WARNING: /sync returned empty next_instruction — "
+            "verify the backend is healthy.",
+            file=sys.stderr,
+        )
+        return False
+    return True
+
+
+# ── SessionStart ──────────────────────────────────────────────────────────────
+
+def _on_session_start(event: dict) -> None:
+    sid = event.get("session_id", "default")
+    pid = _project_id()
+    _write(sid, "project_id", pid)
+    _write(sid, "tool_count", "0")
+
+    history = _get(f"/history/{pid}?limit=1")
+    if not history:
+        return
+
+    latest = history[0]
+    planner = latest.get("_planner_output") or {}
+    next_instr = (planner.get("next_instruction") or "").strip()
+    ctx = (planner.get("context_summary") or "").strip()
+    priority = (planner.get("priority_focus") or "").strip()
+
+    if priority:
+        _write(sid, "priority", priority)
+    if latest.get("user_goal"):
+        _write(sid, "goal", latest["user_goal"])
+
+    if not (next_instr or ctx):
+        return
+
+    lines = ["[context-bridge] Session context restored:"]
+    if ctx:
+        lines.append(f"  Summary:  {ctx}")
+    if next_instr:
+        lines.append(f"  Next:     {next_instr}")
+    if priority:
+        lines.append(f"  Priority: {priority}")
+    print("\n".join(lines))
+
+
+# ── PostToolUse ───────────────────────────────────────────────────────────────
+
+def _on_post_tool_use(event: dict) -> None:
+    sid = event.get("session_id", "default")
+    tool = event.get("tool_name", "")
+
+    count = int(_read(sid, "tool_count", "0")) + 1
+    _write(sid, "tool_count", str(count))
+
+    # Every 5 calls: poll for priority change
+    if count % 5 == 0:
+        pid = _read(sid, "project_id") or _project_id()
+        history = _get(f"/history/{pid}?limit=1")
+        if history:
+            planner = history[0].get("_planner_output") or {}
+            new_p = (planner.get("priority_focus") or "").strip()
+            if new_p and new_p != _read(sid, "priority"):
+                _write(sid, "priority", new_p)
+                print(f"[context-bridge] Priority updated: {new_p}")
+
+    if tool == "Task":
+        _auto_checkpoint(event, sid)
+
+
+def _auto_checkpoint(event: dict, sid: str) -> None:
+    tool_input = event.get("tool_input") or {}
+    tool_response = event.get("tool_response") or {}
+
+    pid = _read(sid, "project_id") or _project_id()
+    goal = _read(sid, "goal") or "(not yet recorded — use /sync to set)"
+    task = (
+        tool_input.get("description")
+        or str(tool_input.get("prompt", ""))[:120]
+        or "(auto-checkpoint)"
+    )
+
+    git = _git_meta()
+    files: list = []
+    diff_stat = git.get("git_diff_stat", "")
+    if diff_stat and diff_stat != "(no uncommitted changes)":
+        for line in diff_stat.splitlines():
+            if "|" in line:
+                fname = line.split("|")[0].strip()
+                if fname:
+                    files.append(fname)
+    if not files:
+        files = git.get("recent_files_mtime", [])
+
+    result_text = (
+        str(tool_response.get("result", tool_response.get("output", "")))
+        if isinstance(tool_response, dict)
+        else str(tool_response)
+    )
+    blockers = []
+    for line in result_text.splitlines():
+        if any(kw in line.lower() for kw in ("error:", "failed:", "blocked:", "unable to")):
+            blockers.append(line.strip()[:200])
+            break
+
+    payload = {
+        "project_id": pid,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "user_goal": goal,
+        "current_task": task,
+        "progress_summary": result_text[:500] or "(task completed)",
+        "current_state": {
+            "files_modified": files,
+            "code_summary": "",
+            "architecture_notes": "",
+            "git_diff_stat": git.get("git_diff_stat"),
+            "git_log_recent": git.get("git_log_recent"),
+        },
+        "blockers": blockers,
+        "next_intended_action": "(auto-checkpoint — awaiting planner)",
+    }
+
+    response = _post("/sync", payload)
+    if not _validate(response):
+        return
+
+    priority = (response.get("priority_focus") or "").strip()
+    old_p = _read(sid, "priority")
+    if priority:
+        _write(sid, "priority", priority)
+
+    next_instr = (response.get("next_instruction") or "").strip()
+    if priority and priority != old_p:
+        print(f"[context-bridge] Checkpoint saved. Priority: {priority}")
+    elif next_instr:
+        print(f"[context-bridge] Checkpoint saved. Next: {next_instr[:120]}")
+    else:
+        print("[context-bridge] Checkpoint saved.")
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return
+    hook = event.get("hook_event_name") or event.get("hook_type", "")
+    if hook == "SessionStart":
+        _on_session_start(event)
+    elif hook == "PostToolUse":
+        _on_post_tool_use(event)
+
+
+if __name__ == "__main__":
+    main()

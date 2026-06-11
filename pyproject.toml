@@ -4,42 +4,49 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-bridge"
-version = "0.1.0"
+version = "0.2.0"
 description = "Persistent memory for Claude Code — checkpoint-based replanning across sessions"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 keywords = ["claude-code", "memory", "context", "ai-agents", "checkpoint", "replanning"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "Topic :: Software Development :: Libraries :: Application Frameworks",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
 ]
 dependencies = [
-    "fastapi",
+    "fastapi>=0.115",
     "uvicorn[standard]",
-    "anthropic",
-    "python-dotenv",
+    "pydantic>=2.0",
+    "pydantic-settings",
+    "anthropic>=0.30",
+    "httpx",
 ]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "httpx"]
 
 [project.urls]
 Homepage = "https://github.com/pushkal-kumar/context-bridge"
 Issues = "https://github.com/pushkal-kumar/context-bridge/issues"
 
 [project.scripts]
-context-bridge = "context_bridge.cli:main"
+context-bridge = "server.main:run"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["context_bridge*"]
+include = ["server*"]
 
 [tool.setuptools.package-data]
-context_bridge = ["dashboard.html", "skill.md"]
+server = ["dashboard.html", "skill.md", "hook.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
