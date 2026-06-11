@@ -9,6 +9,7 @@ Handles:
   SessionStart  — inject last checkpoint context before first message
   PostToolUse   — auto-checkpoint on Task completion (with git diff)
                 — poll priority change every 5 tool calls
+  Stop          — end-of-session checkpoint with call-count context
 """
 import json
 import os
@@ -268,6 +269,49 @@ def main() -> None:
         _on_session_start(event)
     elif hook == "PostToolUse":
         _on_post_tool_use(event)
+    elif hook == "Stop":
+        _on_stop(event)
+
+
+def _on_stop(event: dict) -> None:
+    sid = event.get("session_id", "default")
+    count = int(_read(sid, "tool_count", "0"))
+    if count == 0:
+        # Session with no tool calls — nothing to checkpoint
+        return
+
+    pid = _read(sid, "project_id") or _project_id()
+    goal = _read(sid, "goal") or "Session ended"
+    git = _git_meta()
+
+    payload = {
+        "project_id": pid,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "user_goal": goal,
+        "current_task": "End of session",
+        "progress_summary": f"Session closed after {count} tool calls",
+        "current_state": {
+            "files_modified": [],
+            "git_diff_stat": git.get("git_diff_stat"),
+            "git_log_recent": git.get("git_log_recent"),
+        },
+        "blockers": [],
+        "next_intended_action": "Review changes on next session start",
+    }
+
+    result = _post("/checkpoint", payload)
+    if result:
+        print(
+            f"[context-bridge] End-of-session checkpoint saved ({count} tool calls).",
+            file=sys.stderr,
+        )
+
+    # Clean up session state
+    for key in ("tool_count", "priority", "goal", "project_id"):
+        try:
+            _sp(sid, key).unlink(missing_ok=True)
+        except OSError:
+            pass
 
 
 if __name__ == "__main__":
