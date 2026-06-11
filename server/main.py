@@ -8,18 +8,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
 from .memory import (
     compute_stagnation_count,
+    delete_project,
     get_all_projects,
     get_recent_checkpoints,
+    get_stats,
     init_db,
+    project_exists,
     save_checkpoint,
 )
-from .models import CheckpointIn, SyncResponse
+from .models import (
+    CheckpointAck,
+    CheckpointIn,
+    ErrorResponse,
+    ProjectStats,
+    ProjectSummary,
+    SyncResponse,
+)
 from .planner import run_planner
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -36,24 +46,39 @@ _CLAUDE_MD = _CLAUDE_DIR / "CLAUDE.md"
 _IMPORT_LINE = f"@{_SKILL_DEST}"
 
 
+def _not_found(project_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=404,
+        detail=ErrorResponse(
+            error="not_found",
+            message=f"Project '{project_id}' has no checkpoints.",
+        ).model_dump(),
+    )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
-    logger.info("Context Bridge started — DB at %s", settings.db_path)
+    logger.info("Context Bridge started  db=%s  port=%d", settings.db_path, settings.server_port)
     yield
 
 
-app = FastAPI(title="Context Bridge", lifespan=lifespan)
+app = FastAPI(
+    title="Context Bridge",
+    description="Persistent memory for Claude Code. Checkpoint history and replanning across sessions.",
+    version="0.2.0",
+    lifespan=lifespan,
+)
 
 
 @app.get("/", response_class=HTMLResponse, include_in_schema=False)
-async def dashboard():
+async def dashboard() -> HTMLResponse:
     return HTMLResponse(_DASHBOARD)
 
 
-@app.post("/checkpoint")
-async def checkpoint(cp: CheckpointIn):
-    """Store a checkpoint without running the planner. Returns stagnation_count."""
+@app.post("/checkpoint", response_model=CheckpointAck)
+async def checkpoint(cp: CheckpointIn) -> CheckpointAck:
+    """Store a checkpoint without running the planner."""
     data = cp.model_dump()
     if not data["timestamp"]:
         data["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
@@ -62,12 +87,12 @@ async def checkpoint(cp: CheckpointIn):
     stag = compute_stagnation_count(data["project_id"], data["current_task"])
     data["stagnation_count"] = stag
     save_checkpoint(data)
-    logger.info("checkpoint stored project=%s task=%r stagnation=%d", data["project_id"], data["current_task"], stag)
-    return {"project_id": data["project_id"], "stagnation_count": stag}
+    logger.info("checkpoint  project=%s  task=%r  stagnation=%d", data["project_id"], data["current_task"], stag)
+    return CheckpointAck(project_id=data["project_id"], stagnation_count=stag)
 
 
 @app.post("/sync", response_model=SyncResponse)
-async def sync(cp: CheckpointIn):
+async def sync(cp: CheckpointIn) -> SyncResponse:
     """Store a checkpoint and return an authoritative plan."""
     data = cp.model_dump()
     if not data["timestamp"]:
@@ -83,23 +108,57 @@ async def sync(cp: CheckpointIn):
     data["_planner_output"] = result.model_dump()
     save_checkpoint(data)
 
-    logger.info("sync project=%s task=%r source=%s stagnation=%d", data["project_id"], data["current_task"], result.source, stag)
+    logger.info(
+        "sync  project=%s  task=%r  source=%s  stagnation=%d",
+        data["project_id"], data["current_task"], result.source, stag,
+    )
     return result
 
 
 @app.get("/health")
-async def health():
+async def health() -> dict:
     return {"status": "ok", "service": "context-bridge", "port": settings.server_port}
 
 
-@app.get("/projects")
-async def projects():
-    return get_all_projects()
+@app.get("/stats", response_model=ProjectStats)
+async def stats() -> ProjectStats:
+    """Overall database statistics."""
+    return ProjectStats(**get_stats())
 
 
-@app.get("/history/{project_id}")
-async def history(project_id: str, limit: int = 50):
+@app.get("/projects", response_model=list[ProjectSummary])
+async def projects() -> list[ProjectSummary]:
+    return [ProjectSummary(**p) for p in get_all_projects()]
+
+
+@app.delete("/projects/{project_id}")
+async def delete(project_id: str) -> dict:
+    """Delete a project and all its checkpoints."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    count = delete_project(project_id)
+    logger.info("deleted  project=%s  checkpoints=%d", project_id, count)
+    return {"deleted": count}
+
+
+@app.get("/history/{project_id}", response_model=list[dict])
+async def history(project_id: str, limit: int = 50) -> list[dict]:
+    if not project_exists(project_id):
+        raise _not_found(project_id)
     return get_recent_checkpoints(project_id, n=min(limit, 100))
+
+
+@app.get("/projects/{project_id}/export")
+async def export(project_id: str) -> JSONResponse:
+    """Download all checkpoints for a project as JSON."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    data = get_recent_checkpoints(project_id, n=10_000)
+    filename = f"context-bridge-{project_id}.json"
+    return JSONResponse(
+        content=data,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
 
 
 # ── Install command ───────────────────────────────────────────────────────────
@@ -107,37 +166,35 @@ async def history(project_id: str, limit: int = 50):
 def _do_install() -> None:
     _CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Skill file → ~/.claude/context-bridge.md
     if _SKILL_SRC.exists():
         shutil.copy(_SKILL_SRC, _SKILL_DEST)
-        print(f"  Skill     → {_SKILL_DEST}")
+        print(f"  Skill     -> {_SKILL_DEST}")
     else:
         print(f"  WARNING: skill source missing at {_SKILL_SRC}")
         return
 
-    # Wire @import to ~/.claude/CLAUDE.md
     if _CLAUDE_MD.exists():
         content = _CLAUDE_MD.read_text()
         if _IMPORT_LINE not in content:
             _CLAUDE_MD.write_text(content.rstrip() + f"\n\n{_IMPORT_LINE}\n")
-            print(f"  Wired     → {_CLAUDE_MD}")
+            print(f"  Wired     -> {_CLAUDE_MD}")
         else:
-            print(f"  Already   → {_CLAUDE_MD}")
+            print(f"  Already   -> {_CLAUDE_MD}")
     else:
         _CLAUDE_MD.write_text(f"{_IMPORT_LINE}\n")
-        print(f"  Created   → {_CLAUDE_MD}")
+        print(f"  Created   -> {_CLAUDE_MD}")
 
-    # Hook script → ~/.claude/context-bridge-hook.py
     if _HOOK_SRC.exists():
         shutil.copy(_HOOK_SRC, _HOOK_DEST)
         _HOOK_DEST.chmod(0o755)
-        print(f"  Hook      → {_HOOK_DEST}")
+        print(f"  Hook      -> {_HOOK_DEST}")
 
-    # Lifecycle hooks in ~/.claude/settings.json
     _configure_hooks()
 
     print()
-    print("✅ Done. Hooks active: SessionStart restores context. PostToolUse auto-checkpoints.")
+    print("Done. Hooks active:")
+    print("  SessionStart  restores last checkpoint before your first message")
+    print("  PostToolUse   auto-checkpoints after every Task completion")
 
 
 def _configure_hooks() -> None:
@@ -161,9 +218,39 @@ def _configure_hooks() -> None:
 
     if changed:
         _SETTINGS_PATH.write_text(json.dumps(settings_data, indent=2) + "\n")
-        print(f"  Hooks     → {_SETTINGS_PATH}")
+        print(f"  Hooks     -> {_SETTINGS_PATH}")
     else:
-        print(f"  Hooks OK  → {_SETTINGS_PATH}")
+        print(f"  Hooks OK  -> {_SETTINGS_PATH}")
+
+
+def _do_status() -> None:
+    import urllib.request
+    url = f"http://127.0.0.1:{settings.server_port}/health"
+    try:
+        with urllib.request.urlopen(url, timeout=2) as r:
+            data = json.loads(r.read())
+            print(f"Backend    running on port {data['port']}")
+    except Exception:
+        print(f"Backend    not running  (start with: context-bridge)")
+        return
+
+    print(f"DB         {settings.db_path}")
+    try:
+        url = f"http://127.0.0.1:{settings.server_port}/stats"
+        with urllib.request.urlopen(url, timeout=2) as r:
+            s = json.loads(r.read())
+            print(f"Projects   {s['total_projects']}")
+            print(f"Checkpoints {s['total_checkpoints']}")
+            print(f"Stagnation events {s['stagnation_events']}")
+    except Exception:
+        pass
+
+    planner = "rule-based (no LLM configured)"
+    if settings.anthropic_api_key:
+        planner = "Anthropic (claude-sonnet-4-6)"
+    elif settings.resolved_ollama_host():
+        planner = f"Ollama ({settings.ollama_model})"
+    print(f"Planner    {planner}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -171,19 +258,22 @@ def _configure_hooks() -> None:
 def run() -> None:
     parser = argparse.ArgumentParser(
         prog="context-bridge",
-        description="Persistent memory for Claude Code — checkpoint-based replanning.",
+        description="Persistent memory for Claude Code.",
     )
     sub = parser.add_subparsers(dest="cmd")
-    sub.add_parser("install", help="Install skill + hooks to ~/.claude/")
-    sub.add_parser("start", help="Start the backend server (default)")
+    sub.add_parser("install", help="Install skill + lifecycle hooks to ~/.claude/")
+    sub.add_parser("start",   help="Start the backend server (default)")
+    sub.add_parser("status",  help="Check backend status and planner configuration")
     args = parser.parse_args()
 
     if args.cmd == "install":
         _do_install()
+    elif args.cmd == "status":
+        _do_status()
     else:
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Context Bridge  http://127.0.0.1:{settings.server_port}")
         print(f"Dashboard       http://127.0.0.1:{settings.server_port}/")
         print(f"DB              {settings.db_path}")
-        print("Press Ctrl+C to stop.\n")
-        uvicorn.run("server.main:app", host="127.0.0.1", port=settings.server_port)
+        print("Ctrl+C to stop.\n")
+        uvicorn.run("server.main:app", host="127.0.0.1", port=settings.server_port, log_level="warning")
