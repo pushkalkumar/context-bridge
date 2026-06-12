@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Context Bridge",
     description="Persistent memory for Claude Code. Checkpoint history and replanning across sessions.",
-    version="0.3.0",
+    version="0.4.0",
     lifespan=lifespan,
 )
 

@@ -5,7 +5,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
+## [0.4.0] - 2026-06-12
+
+### Changed
+- **PyPI distribution renamed to `claude-context-bridge`** — the `context-bridge`
+  name on PyPI belongs to an unrelated package. The CLI command, repo name, and
+  import paths are unchanged
+- Removed the orphaned `context_bridge/` duplicate package and `server/skill.md`;
+  the canonical skill is `skill/CLAUDE.md`, shipped in the wheel as package data
+- Skill rewritten with activation frontmatter, an explicit /sync-vs-/checkpoint
+  decision tree, once-per-project confirmation, and no curl content (moved to
+  `docs/manual-sync.md`)
+- README restructured to lead with the restored-context output; added the
+  "Why not just use CLAUDE.md?" section
+- Rule-based stagnation wording: "has appeared N consecutive times" instead of
+  "you have submitted N times"
+- installer: `--upgrade` and `--uninstall` flags, wired-hook summary output,
+  optional macOS launchd agent, server-running detection, prompts read from
+  /dev/tty so they work under `curl | bash`
+- `context-bridge uninstall` subcommand removes hooks, the hook script, the
+  skill file, and the CLAUDE.md import line
 
 ### Fixed
 - `Stop` lifecycle hook was handled by the hook script but never registered by
@@ -13,10 +32,12 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Export download filename contained raw slashes from `reponame/branch` project IDs
 - Stagnation-report `elapsed_hours` overwrote the offset of timezone-aware
   client timestamps instead of respecting it
-
-### Changed
-- README documents structured memory, the session-start injection formats,
-  the behavior protocol, and the full lifecycle including the Stop hook
+- Hook session-state files no longer collide between parallel sessions
+  (full session ID instead of a 20-char prefix)
+- SessionStart warns on stderr when the backend is down instead of failing silently
+- Stop-hook snapshots include the changed-file list, not just the tool-call count
+- Planner prompt caps history at the 10 most recent checkpoints
+- `_parse` accepts bare ``` fences, not just ```json
 
 ---
 
