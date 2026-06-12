@@ -31,9 +31,20 @@ After every `Task` tool call, a hook captures what Claude did (git diff, files m
   Next:     Implement /login: verify bcrypt hash, sign HS256 token with
             SECRET_KEY from env, return {access_token, token_type: "bearer"}.
   Priority: SECRET_KEY must come from env — it was hardcoded in auth.py:34 last session
+  Hotspots: auth.py (5x), main.py (3x)
+  Recurring blocker: SECRET_KEY hardcoded (2x)
 ```
 
 Claude picks up exactly where it left off. No re-explanation, no re-orientation.
+
+On a project with no history yet, the hook injects a cross-project developer profile instead — built automatically from everything you've checkpointed before:
+
+```
+[context-bridge] Developer profile active (built from prior projects):
+  Preferred stack: fastapi, react, sqlite
+  Known pitfall: Missing env var (occurred 4x)
+  Avoid suggesting: Celery with Redis (abandoned in 2 prior projects)
+```
 
 ---
 
@@ -41,7 +52,7 @@ Claude picks up exactly where it left off. No re-explanation, no re-orientation.
 
 ```bash
 pip install context-bridge
-context-bridge install     # wires SessionStart + PostToolUse hooks into ~/.claude/
+context-bridge install     # wires SessionStart + PostToolUse + Stop hooks into ~/.claude/
 context-bridge             # starts the backend on port 7723
 ```
 
@@ -52,6 +63,8 @@ curl -fsSL https://raw.githubusercontent.com/pushkalkumar/context-bridge/main/in
 ```
 
 Open Claude Code. The hooks are live on the next session.
+
+`context-bridge install` puts three things in `~/.claude/`: the hook script (`context-bridge-hook.py`), the lifecycle hook wiring in `settings.json`, and a behavior protocol (`context-bridge.md`, imported from your `CLAUDE.md`). The protocol tells Claude how to act on the injected context: announce the restored state instead of silently absorbing it, never violate the active `priority_focus` without surfacing the conflict, pause and decompose when stagnation is detected, and treat rule-based planner output as binding while LLM planner output may be reasoned about.
 
 ---
 
@@ -72,7 +85,7 @@ context-bridge status      # backend health + planner tier in use
   data-pipeline/main        8 checkpoints   3d ago
 ```
 
-The stagnation warning fires when Claude submits the same task three sessions in a row. The planner catches it and forces decomposition.
+The stagnation warning fires when Claude submits the same task three sessions in a row. The planner catches it, runs a root-cause analysis (`/stagnation-report`: stuck since when, dominant blocker, recommendation), and forces decomposition into the smallest completable subtask.
 
 ---
 
@@ -101,6 +114,26 @@ Ollama is auto-detected at `localhost:11434` — you don't need to set `OLLAMA_H
 
 ---
 
+## Structured memory, not just a timeline
+
+Checkpoints record what happened. Since 0.3.0 they can also record what was decided, what failed, and what was learned — via an optional `event_type` on any checkpoint:
+
+| Event type | Captures | Why it matters |
+|------------|----------|----------------|
+| `checkpoint` | Task, progress, blockers (default) | Session continuity |
+| `adr` | `decision`, `reason`, `tradeoff` | Claude stops re-litigating settled decisions |
+| `failure` | `attempted`, `failed_because` | Abandoned approaches are never suggested again |
+| `pattern` | A recurring solution | Reusable across sessions |
+| `outcome` | `goal`, `change_made`, `result` | Measurable results of changes |
+
+These events power three analysis endpoints:
+
+- **`/projects/{id}/stagnation-report`** — when Claude is stuck, finds when the task first appeared, how long it's been stuck, and the dominant blocker. The planner attaches this to its response automatically at three repeats, so the decomposition targets the root cause instead of guessing.
+- **`/projects/{id}/patterns`** — files modified across 3+ checkpoints (architectural hotspots), blockers seen 2+ times (systemic issues), tasks resubmitted 3+ times (underscoped work). Injected at session start alongside the restored context.
+- **`/profile`** — aggregates across *all* projects: preferred stack (from ADR notes), common pitfalls (from blockers), rejected approaches (from failure events). Injected when you start a project that has no history yet. No configuration — it builds itself from what you've already recorded.
+
+---
+
 ## How it works
 
 ```
@@ -115,6 +148,7 @@ PostToolUse hook
   POST /sync  ──────────────────────────> Backend (port 7723)
                                                |
                                                | stagnation check
+                                               | (root-cause report at 3 repeats)
                                                | Anthropic / Ollama / rule-based
                                                |
   <── next_instruction + priority_focus <──────┘
@@ -123,11 +157,20 @@ PostToolUse hook
         | GET /history/{project_id}?limit=1
         | alert if priority changed
         |
+Session ends
+        |
+Stop hook
+  POST /checkpoint  (end-of-session snapshot)
+        |
 Next session starts
         |
 SessionStart hook
-  GET /history/{project_id}?limit=1
-  inject: context_summary, next_instruction, priority_focus
+  known project:  GET /history + /patterns
+                  inject: context_summary, next_instruction,
+                          priority_focus, hotspots, recurring blockers
+  new project:    GET /profile
+                  inject: developer profile (stack, pitfalls,
+                          rejected approaches)
         |
         v
 Claude receives context before seeing any user message
@@ -188,19 +231,36 @@ Response:
 | `GET` | `/projects/{project_id}/patterns` | File hotspots, recurring blockers, unresolved tasks |
 | `GET` | `/profile` | Cross-project developer profile |
 
-### Structured events
+### Recording structured events
 
-Checkpoints accept an optional `event_type` (`checkpoint` default, `adr`, `failure`,
-`pattern`, `outcome`) plus an `event_data` object. ADR events record
-`decision`/`reason`/`tradeoff`; failure events record `attempted`/`failed_because`;
-outcome events record `goal`/`change_made`/`result`. ADR and failure events feed
-the `/profile` endpoint: the SessionStart hook injects a brief developer profile
-(preferred stack, known pitfalls, abandoned approaches) when you open a project
-with no history yet.
+Add `event_type` and `event_data` to any `/checkpoint` or `/sync` payload:
 
-When `stagnation_count` reaches 3, `/sync` runs the stagnation analysis and returns
-a `stagnation_report` (stuck since when, dominant blocker, recommendation) alongside
-the plan.
+```json
+{
+  "project_id": "my-app/main",
+  "user_goal": "Build JWT authentication",
+  "current_task": "Architecture decision: auth strategy",
+  "progress_summary": "Decided on approach",
+  "event_type": "adr",
+  "event_data": {
+    "decision": "JWT with HS256, tokens in Authorization header",
+    "reason": "Stateless, fits the existing FastAPI setup",
+    "tradeoff": "No server-side revocation without a blocklist"
+  }
+}
+```
+
+At `stagnation_count >= 3`, the `/sync` response also carries a `stagnation_report`:
+
+```json
+{
+  "stuck_since": "2026-06-08T14:23:00",
+  "elapsed_hours": 6.2,
+  "primary_blocker": "Auth architecture uncertainty",
+  "recommendation": "Resolve it before writing more code — if it stems from an unmade decision, record an ADR first.",
+  "checkpoint_count": 4
+}
+```
 
 ---
 
@@ -234,7 +294,7 @@ The rule-based planner does three things:
 
 ## Contributing
 
-Issues and PRs are welcome. The codebase is small and well-tested (37 tests covering every endpoint).
+Issues and PRs are welcome. The codebase is small and well-tested (40 tests covering every endpoint).
 
 ```bash
 git clone https://github.com/pushkalkumar/context-bridge

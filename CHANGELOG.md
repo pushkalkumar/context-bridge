@@ -5,6 +5,21 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- `Stop` lifecycle hook was handled by the hook script but never registered by
+  `context-bridge install` — end-of-session checkpoints now actually fire
+- Export download filename contained raw slashes from `reponame/branch` project IDs
+- Stagnation-report `elapsed_hours` overwrote the offset of timezone-aware
+  client timestamps instead of respecting it
+
+### Changed
+- README documents structured memory, the session-start injection formats,
+  the behavior protocol, and the full lifecycle including the Stop hook
+
+---
+
 ## [0.3.0] - 2026-06-11
 
 ### Added

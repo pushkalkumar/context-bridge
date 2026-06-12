@@ -225,6 +225,7 @@ def _do_install() -> None:
     print("Done. Hooks active:")
     print("  SessionStart  restores last checkpoint before your first message")
     print("  PostToolUse   auto-checkpoints after every Task completion")
+    print("  Stop          saves an end-of-session checkpoint")
 
 
 def _configure_hooks() -> None:
@@ -238,6 +239,7 @@ def _configure_hooks() -> None:
     entries = {
         "SessionStart": {"hooks": [{"type": "command", "command": hook_cmd}]},
         "PostToolUse": {"matcher": "", "hooks": [{"type": "command", "command": hook_cmd}]},
+        "Stop": {"hooks": [{"type": "command", "command": hook_cmd}]},
     }
     changed = False
     for event, entry in entries.items():

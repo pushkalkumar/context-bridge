@@ -423,6 +423,26 @@ def test_profile_aggregates_across_projects(client, monkeypatch):
     assert rejected[0]["project_id"] == "proj-b"
 
 
+# ── Install: hook wiring ──────────────────────────────────────────────────────
+
+def test_configure_hooks_registers_all_lifecycle_events(tmp_path, monkeypatch):
+    """install must wire every event hook.py handles, idempotently."""
+    from server import main as server_main
+
+    settings_path = tmp_path / "settings.json"
+    monkeypatch.setattr(server_main, "_SETTINGS_PATH", settings_path)
+
+    server_main._configure_hooks()
+    server_main._configure_hooks()  # second run must not duplicate entries
+
+    hooks = json.loads(settings_path.read_text())["hooks"]
+    for event in ("SessionStart", "PostToolUse", "Stop"):
+        assert event in hooks
+        commands = [h["command"] for e in hooks[event] for h in e["hooks"]]
+        assert len(commands) == 1
+        assert "context-bridge-hook.py" in commands[0]
+
+
 # ── Dashboard ─────────────────────────────────────────────────────────────────
 
 def test_dashboard_returns_html(client):
