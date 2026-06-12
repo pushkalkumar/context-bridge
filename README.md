@@ -184,6 +184,23 @@ Response:
 | `GET` | `/stats` | Total projects, checkpoints, stagnation events |
 | `DELETE` | `/projects/{project_id}` | Delete a project |
 | `GET` | `/projects/{project_id}/export` | Download history as JSON |
+| `GET` | `/projects/{project_id}/stagnation-report` | Root-cause analysis of a stuck task |
+| `GET` | `/projects/{project_id}/patterns` | File hotspots, recurring blockers, unresolved tasks |
+| `GET` | `/profile` | Cross-project developer profile |
+
+### Structured events
+
+Checkpoints accept an optional `event_type` (`checkpoint` default, `adr`, `failure`,
+`pattern`, `outcome`) plus an `event_data` object. ADR events record
+`decision`/`reason`/`tradeoff`; failure events record `attempted`/`failed_because`;
+outcome events record `goal`/`change_made`/`result`. ADR and failure events feed
+the `/profile` endpoint: the SessionStart hook injects a brief developer profile
+(preferred stack, known pitfalls, abandoned approaches) when you open a project
+with no history yet.
+
+When `stagnation_count` reaches 3, `/sync` runs the stagnation analysis and returns
+a `stagnation_report` (stuck since when, dominant blocker, recommendation) alongside
+the plan.
 
 ---
 
@@ -217,7 +234,7 @@ The rule-based planner does three things:
 
 ## Contributing
 
-Issues and PRs are welcome. The codebase is small and well-tested (23 tests covering every endpoint).
+Issues and PRs are welcome. The codebase is small and well-tested (37 tests covering every endpoint).
 
 ```bash
 git clone https://github.com/pushkalkumar/context-bridge
