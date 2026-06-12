@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "context-bridge"
-version = "0.3.0"
+version = "0.4.0"
 description = "Persistent memory for Claude Code — checkpoint-based replanning across sessions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,12 +41,17 @@ Issues = "https://github.com/pushkalkumar/context-bridge/issues"
 [project.scripts]
 context-bridge = "server.main:run"
 
+# `skill` is a data-only namespace package so the canonical skill file
+# (skill/CLAUDE.md) ships in the wheel and `context-bridge install` can
+# resolve it from site-packages as well as from a repo checkout.
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["server*"]
+include = ["server*", "skill*"]
+namespaces = true
 
 [tool.setuptools.package-data]
-server = ["dashboard.html", "skill.md", "hook.py"]
+server = ["dashboard.html", "hook.py"]
+skill = ["CLAUDE.md"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
