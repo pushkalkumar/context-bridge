@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 def _build_prompt(
     user_goal: str, history: list[dict], current: dict, stagnation_report: dict | None = None
 ) -> str:
+    history = history[:10]
     history_lines = "\n".join(
         "[{ts}] task={task!r} progress={prog!r} blockers={blk}{advice}".format(
             ts=c["timestamp"],
@@ -67,7 +68,8 @@ def _build_prompt(
 def _parse(raw: str) -> dict:
     raw = raw.strip()
     if raw.startswith("```"):
-        raw = raw.split("\n", 1)[1].rsplit("```", 1)[0]
+        raw = raw.split("\n", 1)[1]
+        raw = raw.rsplit("```", 1)[0]
     return json.loads(raw.strip())
 
 
@@ -98,7 +100,6 @@ def _run_anthropic(
             stagnation_count=checkpoint.get("stagnation_count", 1),
         )
     except Exception as exc:
-        # 429 rate limit, network errors, parse failures — all fall through
         logger.warning("Anthropic planner failed (%s: %s) — trying next tier", type(exc).__name__, exc)
         return None
 
@@ -151,7 +152,7 @@ def _rule_based(
 
     if stagnation_count >= 3:
         instruction = (
-            f"You have submitted '{task}' {stagnation_count} times in a row. "
+            f"The task '{task}' has appeared {stagnation_count} consecutive times without completing. "
             "Pick the smallest completable subtask and do only that one thing."
         )
         if stagnation_report:

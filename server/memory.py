@@ -45,8 +45,10 @@ def init_db() -> None:
             )
             """
         )
-        # Migrate pre-0.3 databases created without the event_type column.
         cols = {row[1] for row in con.execute("PRAGMA table_info(checkpoints)")}
+        if "id" not in cols:
+            con.execute("ALTER TABLE checkpoints ADD COLUMN id INTEGER")
+            con.execute("UPDATE checkpoints SET id = rowid WHERE id IS NULL")
         if "event_type" not in cols:
             con.execute("ALTER TABLE checkpoints ADD COLUMN event_type TEXT NOT NULL DEFAULT 'checkpoint'")
         con.execute("CREATE INDEX IF NOT EXISTS idx_project_ts ON checkpoints(project_id, timestamp DESC, id DESC)")

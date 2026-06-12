@@ -5,7 +5,7 @@ No API key required — all tests use the rule-based tier.
 import pytest
 
 from server.models import SyncResponse
-from server.planner import _rule_based, run_planner
+from server.planner import _build_prompt, _parse, _rule_based, run_planner
 
 
 def _cp(**overrides):
@@ -96,3 +96,19 @@ def test_sync_response_validates():
             priority_focus="x",
             source="invalid-source",  # not a valid Literal
         )
+
+
+def test_build_prompt_caps_history_to_ten_entries():
+    """The planner prompt should remain bounded even with lots of history."""
+    history = [
+        {"timestamp": f"2026-06-0{i}T00:00:00", "current_task": f"Task {i}", "progress_summary": "x", "blockers": []}
+        for i in range(15)
+    ]
+    prompt = _build_prompt("Implement auth", history, _cp())
+    assert prompt.count("[2026-06-0") == 10
+
+
+def test_parse_accepts_bare_triple_backtick_fences():
+    """Bare triple-backtick fences should parse as JSON payloads."""
+    payload = "```\n{\"next_instruction\": \"do it\"}\n```"
+    assert _parse(payload) == {"next_instruction": "do it"}

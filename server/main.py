@@ -42,7 +42,9 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(me
 logger = logging.getLogger(__name__)
 
 _DASHBOARD = (Path(__file__).parent / "dashboard.html").read_text()
-_SKILL_SRC = Path(__file__).parent / "skill.md"
+# Canonical skill lives at skill/CLAUDE.md — one level above the server package
+# both in a repo checkout and in site-packages (shipped as namespace package data).
+_SKILL_SRC = Path(__file__).resolve().parent.parent / "skill" / "CLAUDE.md"
 _HOOK_SRC = Path(__file__).parent / "hook.py"
 _CLAUDE_DIR = Path.home() / ".claude"
 _SKILL_DEST = _CLAUDE_DIR / "context-bridge.md"
@@ -193,39 +195,35 @@ async def export(project_id: str) -> JSONResponse:
 
 # ── Install command ───────────────────────────────────────────────────────────
 
+_HOOK_EVENTS = ("SessionStart", "PostToolUse", "Stop")
+
+
 def _do_install() -> None:
     _CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
 
-    if _SKILL_SRC.exists():
-        shutil.copy(_SKILL_SRC, _SKILL_DEST)
-        print(f"  Skill     -> {_SKILL_DEST}")
-    else:
-        print(f"  WARNING: skill source missing at {_SKILL_SRC}")
-        return
+    if not _SKILL_SRC.exists():
+        print(f"ERROR: skill source missing at {_SKILL_SRC}")
+        raise SystemExit(1)
+    shutil.copy(_SKILL_SRC, _SKILL_DEST)
 
     if _CLAUDE_MD.exists():
         content = _CLAUDE_MD.read_text()
         if _IMPORT_LINE not in content:
             _CLAUDE_MD.write_text(content.rstrip() + f"\n\n{_IMPORT_LINE}\n")
-            print(f"  Wired     -> {_CLAUDE_MD}")
-        else:
-            print(f"  Already   -> {_CLAUDE_MD}")
     else:
         _CLAUDE_MD.write_text(f"{_IMPORT_LINE}\n")
-        print(f"  Created   -> {_CLAUDE_MD}")
 
     if _HOOK_SRC.exists():
         shutil.copy(_HOOK_SRC, _HOOK_DEST)
         _HOOK_DEST.chmod(0o755)
-        print(f"  Hook      -> {_HOOK_DEST}")
 
     _configure_hooks()
 
-    print()
-    print("Done. Hooks active:")
-    print("  SessionStart  restores last checkpoint before your first message")
-    print("  PostToolUse   auto-checkpoints after every Task completion")
-    print("  Stop          saves an end-of-session checkpoint")
+    hook_dest = str(_HOOK_DEST).replace(str(Path.home()), "~")
+    print(f"✓ SessionStart hook  → {hook_dest}")
+    print(f"✓ PostToolUse hook   → {hook_dest}")
+    print(f"✓ Stop hook          → {hook_dest}")
+    print(f"✓ Skill imported     → CLAUDE.md ← {_SKILL_DEST.name}")
 
 
 def _configure_hooks() -> None:
@@ -250,9 +248,49 @@ def _configure_hooks() -> None:
 
     if changed:
         _SETTINGS_PATH.write_text(json.dumps(settings_data, indent=2) + "\n")
-        print(f"  Hooks     -> {_SETTINGS_PATH}")
-    else:
-        print(f"  Hooks OK  -> {_SETTINGS_PATH}")
+
+
+def _unconfigure_hooks() -> bool:
+    """Remove context-bridge entries from settings.json. Returns True if changed."""
+    hook_cmd = f"python3 {_HOOK_DEST}"
+    try:
+        settings_data = json.loads(_SETTINGS_PATH.read_text()) if _SETTINGS_PATH.exists() else {}
+    except (ValueError, OSError):
+        return False
+
+    hooks = settings_data.get("hooks", {})
+    changed = False
+    for event in _HOOK_EVENTS:
+        kept = [
+            e for e in hooks.get(event, [])
+            if not any(h.get("command") == hook_cmd for h in e.get("hooks", []))
+        ]
+        if kept != hooks.get(event, []):
+            changed = True
+            if kept:
+                hooks[event] = kept
+            else:
+                hooks.pop(event, None)
+
+    if changed:
+        _SETTINGS_PATH.write_text(json.dumps(settings_data, indent=2) + "\n")
+    return changed
+
+
+def _do_uninstall() -> None:
+    """Remove hooks, hook script, skill file, and the CLAUDE.md import line."""
+    if _unconfigure_hooks():
+        print(f"✗ Hooks removed      → {_SETTINGS_PATH}")
+    for path, label in ((_HOOK_DEST, "Hook script removed"), (_SKILL_DEST, "Skill removed")):
+        if path.exists():
+            path.unlink()
+            print(f"✗ {label:<18} → {path}")
+    if _CLAUDE_MD.exists():
+        content = _CLAUDE_MD.read_text()
+        if _IMPORT_LINE in content:
+            _CLAUDE_MD.write_text(content.replace(f"\n\n{_IMPORT_LINE}\n", "\n").replace(f"{_IMPORT_LINE}\n", ""))
+            print(f"✗ Import removed     → {_CLAUDE_MD}")
+    print("Done. The checkpoint database at ~/.context-bridge/ was not touched.")
 
 
 def _fetch(path: str, timeout: float = 2.0):
@@ -334,13 +372,16 @@ def run() -> None:
     )
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install", help="Install skill + lifecycle hooks to ~/.claude/")
-    sub.add_parser("start",   help="Start the backend server (default)")
-    sub.add_parser("status",  help="Check backend status and planner configuration")
-    sub.add_parser("list",    help="List all projects with checkpoint counts")
+    sub.add_parser("uninstall", help="Remove hooks and the installed skill")
+    sub.add_parser("start", help="Start the backend server (default)")
+    sub.add_parser("status", help="Check backend status and planner configuration")
+    sub.add_parser("list", help="List all projects with checkpoint counts")
     args = parser.parse_args()
 
     if args.cmd == "install":
         _do_install()
+    elif args.cmd == "uninstall":
+        _do_uninstall()
     elif args.cmd == "status":
         _do_status()
     elif args.cmd == "list":

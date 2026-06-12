@@ -22,13 +22,18 @@ from pathlib import Path
 
 BASE_URL = os.environ.get("CONTEXT_BRIDGE_URL", "http://127.0.0.1:7723")
 _STATE_DIR = Path("/tmp/context-bridge-hooks")
+_TASK_TOOL_NAMES = {"Task", "task"}
 
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
+def _sanitize_sid(sid: str) -> str:
+    return sid.replace("/", "_").replace("\\", "_")
+
+
 def _sp(sid: str, key: str) -> Path:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return _STATE_DIR / f"{sid[:20]}_{key}.txt"
+    return _STATE_DIR / f"{_sanitize_sid(sid)}_{key}.txt"
 
 
 def _read(sid: str, key: str, default: str = "") -> str:
@@ -183,9 +188,16 @@ def _on_session_start(event: dict) -> None:
     _write(sid, "project_id", pid)
     _write(sid, "tool_count", "0")
 
+    if not _get("/health"):
+        print(
+            "[context-bridge] Backend not running. Start it with: context-bridge\n"
+            "Memory hooks are wired but inactive until the server is up.",
+            file=sys.stderr,
+        )
+        return
+
     history = _get(f"/history/{pid}?limit=1")
     if not history:
-        # New project — inject the cross-project developer profile instead.
         profile = _profile_lines()
         if profile:
             print("\n".join(profile))
@@ -225,7 +237,6 @@ def _on_post_tool_use(event: dict) -> None:
     count = int(_read(sid, "tool_count", "0")) + 1
     _write(sid, "tool_count", str(count))
 
-    # Every 5 calls: poll for priority change
     if count % 5 == 0:
         pid = _read(sid, "project_id") or _project_id()
         history = _get(f"/history/{pid}?limit=1")
@@ -236,7 +247,7 @@ def _on_post_tool_use(event: dict) -> None:
                 _write(sid, "priority", new_p)
                 print(f"[context-bridge] Priority updated: {new_p}")
 
-    if tool == "Task":
+    if tool in _TASK_TOOL_NAMES or tool.lower().startswith("task"):
         _auto_checkpoint(event, sid)
 
 
@@ -342,21 +353,35 @@ def _on_stop(event: dict) -> None:
     sid = event.get("session_id", "default")
     count = int(_read(sid, "tool_count", "0"))
     if count == 0:
-        # Session with no tool calls — nothing to checkpoint
         return
 
     pid = _read(sid, "project_id") or _project_id()
     goal = _read(sid, "goal") or "Session ended"
     git = _git_meta()
 
+    files: list = []
+    diff_stat = git.get("git_diff_stat", "")
+    if diff_stat and diff_stat != "(no uncommitted changes)":
+        for line in diff_stat.splitlines():
+            if "|" in line:
+                fname = line.split("|")[0].strip()
+                if fname:
+                    files.append(fname)
+    if not files:
+        files = git.get("recent_files_mtime", [])
+
+    progress_summary = f"Session ended ({count} tool calls)"
+    if files:
+        progress_summary += f". Files changed: {', '.join(files[:10])}"
+
     payload = {
         "project_id": pid,
         "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
         "user_goal": goal,
         "current_task": "End of session",
-        "progress_summary": f"Session closed after {count} tool calls",
+        "progress_summary": progress_summary,
         "current_state": {
-            "files_modified": [],
+            "files_modified": files,
             "git_diff_stat": git.get("git_diff_stat"),
             "git_log_recent": git.get("git_log_recent"),
         },
@@ -371,7 +396,6 @@ def _on_stop(event: dict) -> None:
             file=sys.stderr,
         )
 
-    # Clean up session state
     for key in ("tool_count", "priority", "goal", "project_id"):
         try:
             _sp(sid, key).unlink(missing_ok=True)
