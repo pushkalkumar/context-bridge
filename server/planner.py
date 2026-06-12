@@ -3,14 +3,16 @@ import logging
 from collections import Counter
 
 from .config import settings
-from .models import SyncResponse
+from .models import StagnationReport, SyncResponse
 
 logger = logging.getLogger(__name__)
 
 
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
-def _build_prompt(user_goal: str, history: list[dict], current: dict) -> str:
+def _build_prompt(
+    user_goal: str, history: list[dict], current: dict, stagnation_report: dict | None = None
+) -> str:
     history_lines = "\n".join(
         "[{ts}] task={task!r} progress={prog!r} blockers={blk}{advice}".format(
             ts=c["timestamp"],
@@ -28,6 +30,16 @@ def _build_prompt(user_goal: str, history: list[dict], current: dict) -> str:
     state = current.get("current_state") or {}
     if hasattr(state, "model_dump"):
         state = state.model_dump()
+    stagnation_section = ""
+    if stagnation_report:
+        stagnation_section = (
+            "## Stagnation analysis\n"
+            f"stuck_since: {stagnation_report['stuck_since']} "
+            f"({stagnation_report['elapsed_hours']}h, "
+            f"{stagnation_report['checkpoint_count']} checkpoints)\n"
+            f"primary_blocker: {stagnation_report['primary_blocker'] or 'none recorded'}\n"
+            f"recommendation: {stagnation_report['recommendation']}\n\n"
+        )
     return (
         "You are a coding project planner. Return a JSON plan for the current checkpoint.\n\n"
         f"## Goal\n{user_goal}\n\n"
@@ -40,6 +52,7 @@ def _build_prompt(user_goal: str, history: list[dict], current: dict) -> str:
         f"blockers: {', '.join(current.get('blockers', [])) or 'none'}\n"
         f"next_intended: {current.get('next_intended_action', '')}\n"
         f"stagnation_count: {current.get('stagnation_count', 1)}\n\n"
+        + stagnation_section +
         "If the same task recurs across checkpoints, address why it is stuck and force decomposition.\n\n"
         "Return ONLY valid JSON:\n"
         '{\n'
@@ -60,13 +73,15 @@ def _parse(raw: str) -> dict:
 
 # ── Tier 1: Anthropic ─────────────────────────────────────────────────────────
 
-def _run_anthropic(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
+def _run_anthropic(
+    checkpoint: dict, history: list[dict], stagnation_report: dict | None = None
+) -> SyncResponse | None:
     if not settings.anthropic_api_key:
         return None
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint)
+        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report)
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
@@ -90,13 +105,15 @@ def _run_anthropic(checkpoint: dict, history: list[dict]) -> SyncResponse | None
 
 # ── Tier 2: Ollama ────────────────────────────────────────────────────────────
 
-def _run_ollama(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
+def _run_ollama(
+    checkpoint: dict, history: list[dict], stagnation_report: dict | None = None
+) -> SyncResponse | None:
     host = settings.resolved_ollama_host()
     if not host:
         return None
     try:
         import httpx
-        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint)
+        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report)
         r = httpx.post(
             f"{host}/api/chat",
             json={
@@ -123,7 +140,12 @@ def _run_ollama(checkpoint: dict, history: list[dict]) -> SyncResponse | None:
 
 # ── Tier 3: Rule-based ────────────────────────────────────────────────────────
 
-def _rule_based(checkpoint: dict, history: list[dict], stagnation_count: int) -> SyncResponse:
+def _rule_based(
+    checkpoint: dict,
+    history: list[dict],
+    stagnation_count: int,
+    stagnation_report: dict | None = None,
+) -> SyncResponse:
     blockers = checkpoint.get("blockers", [])
     task = checkpoint["current_task"]
 
@@ -132,6 +154,10 @@ def _rule_based(checkpoint: dict, history: list[dict], stagnation_count: int) ->
             f"You have submitted '{task}' {stagnation_count} times in a row. "
             "Pick the smallest completable subtask and do only that one thing."
         )
+        if stagnation_report:
+            if stagnation_report["primary_blocker"]:
+                instruction += f" Root cause: '{stagnation_report['primary_blocker']}'."
+            instruction += f" {stagnation_report['recommendation']}"
         priority = f"Stagnation on '{task}' ({stagnation_count} consecutive checkpoints)"
     else:
         all_blockers = [b for c in history for b in c.get("blockers", [])]
@@ -187,6 +213,17 @@ def _rule_based(checkpoint: dict, history: list[dict], stagnation_count: int) ->
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-def run_planner(checkpoint: dict, history: list[dict], stagnation_count: int) -> SyncResponse:
-    result = _run_anthropic(checkpoint, history) or _run_ollama(checkpoint, history)
-    return result or _rule_based(checkpoint, history, stagnation_count)
+def run_planner(
+    checkpoint: dict,
+    history: list[dict],
+    stagnation_count: int,
+    stagnation_report: dict | None = None,
+) -> SyncResponse:
+    result = (
+        _run_anthropic(checkpoint, history, stagnation_report)
+        or _run_ollama(checkpoint, history, stagnation_report)
+        or _rule_based(checkpoint, history, stagnation_count, stagnation_report)
+    )
+    if stagnation_report:
+        result.stagnation_report = StagnationReport(**stagnation_report)
+    return result

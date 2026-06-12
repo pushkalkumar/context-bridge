@@ -138,6 +138,45 @@ def _validate(response) -> bool:
 
 # ── SessionStart ──────────────────────────────────────────────────────────────
 
+def _profile_lines() -> list[str]:
+    """Brief cross-project developer profile, shown when a project has no history."""
+    profile = _get("/profile")
+    if not profile or not profile.get("checkpoint_count"):
+        return []
+    lines = ["[context-bridge] Developer profile active (built from prior projects):"]
+    stack = [t["text"] for t in profile.get("tech_patterns", [])[:5]]
+    if stack:
+        lines.append(f"  Preferred stack: {', '.join(stack)}")
+    for b in profile.get("common_blockers", [])[:3]:
+        if b["count"] >= 2:
+            lines.append(f"  Known pitfall: {b['text']} (occurred {b['count']}x)")
+    rejected = profile.get("rejected_approaches", [])
+    seen: dict[str, int] = {}
+    for r in rejected:
+        if r["attempted"]:
+            seen[r["attempted"]] = seen.get(r["attempted"], 0) + 1
+    for attempted, count in sorted(seen.items(), key=lambda kv: -kv[1])[:3]:
+        suffix = f" (abandoned in {count} prior projects)" if count > 1 else " (previously abandoned)"
+        lines.append(f"  Avoid suggesting: {attempted}{suffix}")
+    return lines if len(lines) > 1 else []
+
+
+def _pattern_lines(pid: str) -> list[str]:
+    """Recurring-signal summary appended to the restored-context injection."""
+    patterns = _get(f"/projects/{pid}/patterns")
+    if not patterns:
+        return []
+    lines = []
+    hot = patterns.get("hotspot_files", [])[:3]
+    if hot:
+        lines.append("  Hotspots: " + ", ".join(f"{h['path']} ({h['count']}x)" for h in hot))
+    for b in patterns.get("recurring_blockers", [])[:2]:
+        lines.append(f"  Recurring blocker: {b['text']} ({b['count']}x)")
+    for t in patterns.get("recurring_tasks", [])[:2]:
+        lines.append(f"  Unresolved task: {t['text']} ({t['count']}x)")
+    return lines
+
+
 def _on_session_start(event: dict) -> None:
     sid = event.get("session_id", "default")
     pid = _project_id()
@@ -146,6 +185,10 @@ def _on_session_start(event: dict) -> None:
 
     history = _get(f"/history/{pid}?limit=1")
     if not history:
+        # New project — inject the cross-project developer profile instead.
+        profile = _profile_lines()
+        if profile:
+            print("\n".join(profile))
         return
 
     latest = history[0]
@@ -169,6 +212,7 @@ def _on_session_start(event: dict) -> None:
         lines.append(f"  Next:     {next_instr}")
     if priority:
         lines.append(f"  Priority: {priority}")
+    lines.extend(_pattern_lines(pid))
     print("\n".join(lines))
 
 
@@ -264,6 +308,15 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         print(f"[context-bridge] Checkpoint saved. Next: {next_instr[:120]}")
     else:
         print("[context-bridge] Checkpoint saved.")
+
+    report = response.get("stagnation_report")
+    if report:
+        print(
+            f"[context-bridge] Stagnation report: stuck since {report.get('stuck_since')} "
+            f"({report.get('elapsed_hours')}h, {report.get('checkpoint_count')} checkpoints). "
+            f"Blocker: {report.get('primary_blocker') or 'none recorded'}. "
+            f"{report.get('recommendation', '')}"
+        )
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

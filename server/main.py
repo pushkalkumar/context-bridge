@@ -13,8 +13,11 @@ from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
 from .memory import (
+    build_profile,
+    build_stagnation_report,
     compute_stagnation_count,
     delete_project,
+    extract_patterns,
     get_all_projects,
     get_recent_checkpoints,
     get_stats,
@@ -25,9 +28,12 @@ from .memory import (
 from .models import (
     CheckpointAck,
     CheckpointIn,
+    DeveloperProfile,
     ErrorResponse,
+    PatternsReport,
     ProjectStats,
     ProjectSummary,
+    StagnationReport,
     SyncResponse,
 )
 from .planner import run_planner
@@ -66,7 +72,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Context Bridge",
     description="Persistent memory for Claude Code. Checkpoint history and replanning across sessions.",
-    version="0.2.0",
+    version="0.3.0",
     lifespan=lifespan,
 )
 
@@ -79,7 +85,7 @@ async def dashboard() -> HTMLResponse:
 @app.post("/checkpoint", response_model=CheckpointAck)
 async def checkpoint(cp: CheckpointIn) -> CheckpointAck:
     """Store a checkpoint without running the planner."""
-    data = cp.model_dump()
+    data = cp.model_dump(mode="json")  # event_type as plain str for storage
     if not data["timestamp"]:
         data["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     if not data["project_id"]:
@@ -94,7 +100,7 @@ async def checkpoint(cp: CheckpointIn) -> CheckpointAck:
 @app.post("/sync", response_model=SyncResponse)
 async def sync(cp: CheckpointIn) -> SyncResponse:
     """Store a checkpoint and return an authoritative plan."""
-    data = cp.model_dump()
+    data = cp.model_dump(mode="json")  # event_type as plain str for storage
     if not data["timestamp"]:
         data["timestamp"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     if not data["project_id"]:
@@ -104,7 +110,8 @@ async def sync(cp: CheckpointIn) -> SyncResponse:
     data["stagnation_count"] = stag
 
     history = get_recent_checkpoints(data["project_id"], n=10)
-    result = run_planner(data, history, stag)
+    report = build_stagnation_report(data["project_id"], data["current_task"]) if stag >= 3 else None
+    result = run_planner(data, history, stag, report)
     data["_planner_output"] = result.model_dump()
     save_checkpoint(data)
 
@@ -131,7 +138,7 @@ async def projects() -> list[ProjectSummary]:
     return [ProjectSummary(**p) for p in get_all_projects()]
 
 
-@app.delete("/projects/{project_id}")
+@app.delete("/projects/{project_id:path}")
 async def delete(project_id: str) -> dict:
     """Delete a project and all its checkpoints."""
     if not project_exists(project_id):
@@ -141,14 +148,37 @@ async def delete(project_id: str) -> dict:
     return {"deleted": count}
 
 
-@app.get("/history/{project_id}", response_model=list[dict])
+@app.get("/history/{project_id:path}", response_model=list[dict])
 async def history(project_id: str, limit: int = 50) -> list[dict]:
     if not project_exists(project_id):
         raise _not_found(project_id)
     return get_recent_checkpoints(project_id, n=min(limit, 100))
 
 
-@app.get("/projects/{project_id}/export")
+@app.get("/projects/{project_id:path}/stagnation-report", response_model=StagnationReport)
+async def stagnation_report(project_id: str) -> StagnationReport:
+    """Root-cause analysis of the latest task: stuck since when, on what, why."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    report = build_stagnation_report(project_id)
+    return StagnationReport(**report)
+
+
+@app.get("/projects/{project_id:path}/patterns", response_model=PatternsReport)
+async def patterns(project_id: str) -> PatternsReport:
+    """Recurring signals: file hotspots, repeated blockers, unresolved tasks."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    return PatternsReport(**extract_patterns(project_id))
+
+
+@app.get("/profile", response_model=DeveloperProfile)
+async def profile() -> DeveloperProfile:
+    """Cross-project developer profile built from all stored checkpoints."""
+    return DeveloperProfile(**build_profile())
+
+
+@app.get("/projects/{project_id:path}/export")
 async def export(project_id: str) -> JSONResponse:
     """Download all checkpoints for a project as JSON."""
     if not project_exists(project_id):

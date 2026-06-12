@@ -130,6 +130,19 @@ def test_history_returns_checkpoints(client, monkeypatch):
     assert items[0]["current_task"] == "Implement /login endpoint"
 
 
+def test_history_with_slash_project_id(client, monkeypatch):
+    """Real project IDs are reponame/branch — path routing must accept slashes."""
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    client.post("/checkpoint", json=_checkpoint_payload(project_id="my-app/main"))
+    r = client.get("/history/my-app/main")
+    assert r.status_code == 200
+    assert len(r.json()) == 1
+    r2 = client.get("/projects/my-app/main/patterns")
+    assert r2.status_code == 200
+    assert r2.json()["project_id"] == "my-app/main"
+
+
 def test_history_404_for_unknown_project(client):
     r = client.get("/history/nonexistent-project-xyz")
     assert r.status_code == 404
@@ -232,6 +245,160 @@ def test_export_returns_json_download(client, monkeypatch):
 def test_export_nonexistent_project_404(client):
     r = client.get("/projects/ghost-project/export")
     assert r.status_code == 404
+
+
+# ── Event types ───────────────────────────────────────────────────────────────
+
+def test_checkpoint_defaults_event_type(client):
+    client.post("/checkpoint", json=_checkpoint_payload())
+    r = client.get("/history/test-proj")
+    assert r.json()[0]["event_type"] == "checkpoint"
+
+
+def test_sync_accepts_adr_event(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    payload = _checkpoint_payload(
+        event_type="adr",
+        event_data={
+            "decision": "Use JWT with HS256",
+            "reason": "Stateless",
+            "tradeoff": "No revocation without blocklist",
+        },
+    )
+    r = client.post("/sync", json=payload)
+    assert r.status_code == 200
+    item = client.get("/history/test-proj").json()[0]
+    assert item["event_type"] == "adr"
+    assert item["event_data"]["decision"] == "Use JWT with HS256"
+
+
+def test_checkpoint_rejects_invalid_event_type(client):
+    r = client.post("/checkpoint", json=_checkpoint_payload(event_type="not-a-type"))
+    assert r.status_code == 422
+
+
+# ── GET /projects/{id}/stagnation-report ─────────────────────────────────────
+
+def test_stagnation_report_404_for_unknown_project(client):
+    r = client.get("/projects/ghost-project/stagnation-report")
+    assert r.status_code == 404
+
+
+def test_stagnation_report_root_cause(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    payload = _checkpoint_payload(blockers=["Auth architecture uncertainty"])
+    for _ in range(3):
+        client.post("/sync", json=payload)
+    r = client.get("/projects/test-proj/stagnation-report")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["checkpoint_count"] == 3
+    assert body["primary_blocker"] == "Auth architecture uncertainty"
+    assert body["stuck_since"]
+    assert body["recommendation"]
+    assert body["elapsed_hours"] >= 0
+
+
+def test_sync_includes_stagnation_report_at_count_3(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    payload = _checkpoint_payload()
+    r1 = client.post("/sync", json=payload)
+    r2 = client.post("/sync", json=payload)
+    r3 = client.post("/sync", json=payload)
+    assert r1.json()["stagnation_report"] is None
+    assert r2.json()["stagnation_report"] is None
+    report = r3.json()["stagnation_report"]
+    assert report is not None
+    assert report["checkpoint_count"] == 2  # the two prior checkpoints with this task
+    assert report["recommendation"]
+
+
+# ── GET /projects/{id}/patterns ───────────────────────────────────────────────
+
+def test_patterns_404_for_unknown_project(client):
+    r = client.get("/projects/ghost-project/patterns")
+    assert r.status_code == 404
+
+
+def test_patterns_detects_recurring_signals(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    for i in range(3):
+        client.post("/checkpoint", json=_checkpoint_payload(
+            current_task="Fix auth flow",
+            current_state={"files_modified": ["auth.py", f"other_{i}.py"]},
+            blockers=["Missing env var"] if i < 2 else [],
+        ))
+    r = client.get("/projects/test-proj/patterns")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project_id"] == "test-proj"
+    assert {"path": "auth.py", "count": 3} in body["hotspot_files"]
+    assert not any(h["path"].startswith("other_") for h in body["hotspot_files"])
+    assert {"text": "Missing env var", "count": 2} in body["recurring_blockers"]
+    assert {"text": "Fix auth flow", "count": 3} in body["recurring_tasks"]
+
+
+def test_patterns_empty_for_single_checkpoint(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    client.post("/checkpoint", json=_checkpoint_payload())
+    body = client.get("/projects/test-proj/patterns").json()
+    assert body["hotspot_files"] == []
+    assert body["recurring_blockers"] == []
+    assert body["recurring_tasks"] == []
+
+
+# ── GET /profile ──────────────────────────────────────────────────────────────
+
+def test_profile_empty_db(client):
+    r = client.get("/profile")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["project_count"] == 0
+    assert body["checkpoint_count"] == 0
+    assert body["rejected_approaches"] == []
+
+
+def test_profile_aggregates_across_projects(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    client.post("/checkpoint", json=_checkpoint_payload(
+        project_id="proj-a",
+        current_state={"files_modified": ["main.py", "app.tsx"]},
+        blockers=["Missing env var"],
+    ))
+    client.post("/checkpoint", json=_checkpoint_payload(
+        project_id="proj-b",
+        current_state={
+            "files_modified": ["api.py"],
+            "architecture_notes": "FastAPI backend with SQLite storage",
+        },
+        blockers=["Missing env var"],
+        event_type="adr",
+        event_data={"decision": "FastAPI + SQLite", "reason": "simple", "tradeoff": "single-node"},
+    ))
+    client.post("/checkpoint", json=_checkpoint_payload(
+        project_id="proj-b",
+        current_state={"files_modified": []},
+        event_type="failure",
+        event_data={"attempted": "Celery with Redis broker", "failed_because": "ops complexity"},
+    ))
+    body = client.get("/profile").json()
+    assert body["project_count"] == 2
+    assert body["checkpoint_count"] == 3
+    assert {"text": ".py", "count": 2} in body["top_file_types"]
+    assert {"text": "Missing env var", "count": 2} in body["common_blockers"]
+    techs = {t["text"] for t in body["tech_patterns"]}
+    assert "fastapi" in techs
+    assert "sqlite" in techs
+    rejected = body["rejected_approaches"]
+    assert len(rejected) == 1
+    assert rejected[0]["attempted"] == "Celery with Redis broker"
+    assert rejected[0]["project_id"] == "proj-b"
 
 
 # ── Dashboard ─────────────────────────────────────────────────────────────────

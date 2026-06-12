@@ -43,6 +43,30 @@ def test_stagnation_triggers_at_count_3():
     assert result.stagnation_count == 3
 
 
+def test_stagnation_report_attached_and_used(monkeypatch):
+    """run_planner attaches the report and rule-based folds it into the instruction."""
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    report = {
+        "stuck_since": "2026-06-08T14:23:00",
+        "elapsed_hours": 6.2,
+        "primary_blocker": "Authentication architecture uncertainty",
+        "recommendation": "Record an ADR for auth before writing more code.",
+        "checkpoint_count": 4,
+    }
+    result = run_planner(_cp(), [], stagnation_count=4, stagnation_report=report)
+    assert result.stagnation_report is not None
+    assert result.stagnation_report.primary_blocker == "Authentication architecture uncertainty"
+    assert "Authentication architecture uncertainty" in result.next_instruction
+    assert "Record an ADR" in result.next_instruction
+
+
+def test_no_stagnation_report_below_threshold():
+    """Without a report, the response field stays None."""
+    result = _rule_based(_cp(), [], stagnation_count=1)
+    assert result.stagnation_report is None
+
+
 def test_fallback_when_no_api_key(monkeypatch):
     """run_planner falls back to rule-based when no LLM is configured."""
     monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
