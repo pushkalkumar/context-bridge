@@ -242,6 +242,16 @@ def test_export_returns_json_download(client, monkeypatch):
     assert len(data) == 1
 
 
+def test_export_filename_safe_for_slash_project_id(client, monkeypatch):
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    client.post("/checkpoint", json=_checkpoint_payload(project_id="my-app/main"))
+    r = client.get("/projects/my-app/main/export")
+    assert r.status_code == 200
+    disposition = r.headers["content-disposition"]
+    assert 'filename="context-bridge-my-app-main.json"' in disposition
+
+
 def test_export_nonexistent_project_404(client):
     r = client.get("/projects/ghost-project/export")
     assert r.status_code == 404
@@ -299,6 +309,18 @@ def test_stagnation_report_root_cause(client, monkeypatch):
     assert body["stuck_since"]
     assert body["recommendation"]
     assert body["elapsed_hours"] >= 0
+
+
+def test_stagnation_report_elapsed_hours_with_aware_timestamp(client, monkeypatch):
+    """Timezone-aware client timestamps must not skew elapsed_hours."""
+    from datetime import datetime, timedelta, timezone
+
+    monkeypatch.setattr("server.planner.settings.anthropic_api_key", None)
+    monkeypatch.setattr("server.planner.settings.ollama_host", None)
+    two_hours_ago = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+    client.post("/checkpoint", json=_checkpoint_payload(timestamp=two_hours_ago))
+    body = client.get("/projects/test-proj/stagnation-report").json()
+    assert 1.9 <= body["elapsed_hours"] <= 2.1
 
 
 def test_sync_includes_stagnation_report_at_count_3(client, monkeypatch):

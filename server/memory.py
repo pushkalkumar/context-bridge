@@ -163,7 +163,9 @@ def build_stagnation_report(project_id: str, stuck_task: str | None = None, n: i
 
     stuck_since = matching[-1]["timestamp"]  # newest-first, so last item is earliest
     try:
-        started = datetime.fromisoformat(stuck_since).replace(tzinfo=timezone.utc)
+        started = datetime.fromisoformat(stuck_since)
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=timezone.utc)
         elapsed_hours = round((datetime.now(timezone.utc) - started).total_seconds() / 3600, 1)
     except ValueError:
         elapsed_hours = 0.0

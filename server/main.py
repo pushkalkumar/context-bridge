@@ -184,7 +184,7 @@ async def export(project_id: str) -> JSONResponse:
     if not project_exists(project_id):
         raise _not_found(project_id)
     data = get_recent_checkpoints(project_id, n=10_000)
-    filename = f"context-bridge-{project_id}.json"
+    filename = f"context-bridge-{project_id.replace('/', '-')}.json"
     return JSONResponse(
         content=data,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
