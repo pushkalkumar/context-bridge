@@ -5,6 +5,28 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.5.0] - 2026-06-13
+
+### Added
+- **Velocity tracking** — every task checkpoint records `task_duration_ms`; `GET /velocity/{project_id}` returns the per-project average with a 2× alert when the current task is running long (requires 5+ baseline checkpoints). Alerts are prepended to `next_instruction` so the skill receives them without hook changes.
+- **Checkpoint type hierarchy** — checkpoints are classified as `task` (permanent, counted in stagnation/velocity), `scratch` (ephemeral micro-edits, automatically purged after 24 h), or `session` (end-of-session snapshot). Stagnation counting and velocity baselines exclude scratch checkpoints. A background `asyncio` loop purges stale scratch every 6 h. `GET /projects` now includes a `type_breakdown` field.
+- **Structured planner output** — planner tiers now return a `PlannerOutput` dataclass with `confidence` (0–1), `alternatives` (list of strings), `blocker_class` (rule-classified), and `decomposition_suggested` (flag). These fields propagate through `SyncResponse` and are stored in new SQLite columns. `confidence` drops to 0.3 when an LLM tier returns unparseable JSON (rule-based fallback kicks in).
+- **Semantic search with sqlite-vec** — `POST /search` performs KNN embedding search over `task`/`session` checkpoints. `SessionStart` hook injects a "RELATED PAST WORK" block for results with similarity ≥ 0.75. Embeddings use Voyage AI (`voyageai` package, `VOYAGE_API_KEY` or `ANTHROPIC_API_KEY`); when offline, a zero-vector placeholder is stored and search returns an empty list gracefully. `pip install "claude-context-bridge[semantic]"` pulls in `voyageai`.
+- **`context-bridge diff` command** — `GET /diff/{project_id}` returns the two most recent task-type checkpoints with task summaries, durations, confidence, and changed files. The CLI displays a before/after table with a faster/slower direction indicator. Returns 404 with `{"error":"insufficient_history"}` when fewer than 2 task checkpoints exist.
+- **Computed developer profile** — `GET /profile` now returns `avg_task_velocity_ms`, `preferred_stack` (inferred from file extensions across all checkpoints), `recurring_blocker_classes` (aggregated `planner_blocker_class` counts), and `total_task_checkpoints`. `SessionStart` profile injection uses the new fields.
+- **`context-bridge export` command** — `GET /snapshot/{project_id}` returns a CLAUDE.md-compatible Markdown document covering current state, velocity, recurring patterns, ADR events, and file hotspots. The CLI writes it to `CONTEXT_BRIDGE_SNAPSHOT.md` by default.
+- 55 new tests (97 total, all passing): `test_velocity.py`, `test_checkpoint_types.py`, `test_planner_structured.py`, `test_search.py`, `test_diff.py`, `test_profile_computed.py`, `test_export.py`. A shared `conftest.py` provides `isolated_db` and `client` fixtures that use a real in-memory schema.
+
+### Changed
+- `save_checkpoint()` now returns `int` (the inserted row ID) so the caller can immediately store embeddings for the new checkpoint.
+- `compute_stagnation_count()` excludes `scratch` checkpoints from consecutive-task streak counting.
+- Schema migration is additive: seven new `ALTER TABLE … ADD COLUMN IF NOT EXISTS` statements; existing databases are upgraded automatically on server start.
+
+### Fixed
+- `GET /diff/{project_id}` returns a typed `{"error": "insufficient_history"}` detail instead of a generic 404 message, so CLI output is actionable rather than opaque.
+
+---
+
 ## [0.4.0] - 2026-06-12
 
 ### Changed

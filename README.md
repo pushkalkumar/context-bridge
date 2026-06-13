@@ -81,8 +81,12 @@ Everything is local: a SQLite database in `~/.context-bridge/` and a FastAPI ser
 |---------|--------------|
 | Session continuity | Auto-checkpoint after every task and at session end; context injected on the next start |
 | Stagnation detection | Same task 3x in a row → root-cause report (stuck since, dominant blocker) and forced decomposition |
+| Velocity tracking | Records task duration per checkpoint; alerts in `next_instruction` when the current task is 2× slower than your baseline |
+| Checkpoint types | `task` (permanent), `scratch` (auto-purged after 24 h), `session` (end-of-session) — scratch edits are excluded from stagnation and velocity |
+| Structured planner output | Confidence score, alternative approaches, blocker class, and decomposition flag on every `/sync` response |
+| Semantic search | `POST /search` finds related past work via embedding KNN; top matches injected at session start (requires `[semantic]` extra) |
 | Structured memory | `adr` and `failure` events record decisions and abandoned approaches alongside the timeline |
-| Developer profile | New projects get your cross-project profile: preferred stack, known pitfalls, rejected approaches |
+| Developer profile | New projects get your cross-project profile: preferred stack, velocity average, recurring blocker classes |
 | Offline operation | The rule-based tier needs no API key — checkpoints, stagnation, and blockers all work air-gapped |
 
 ## Commands
@@ -91,8 +95,10 @@ Everything is local: a SQLite database in `~/.context-bridge/` and a FastAPI ser
 context-bridge             # start the backend server
 context-bridge install     # (re)install hooks and skill
 context-bridge uninstall   # remove hooks and skill (keeps the database)
-context-bridge list        # all projects with checkpoint counts
-context-bridge status      # backend health + planner tier in use
+context-bridge list        # all projects with checkpoint counts and type breakdown
+context-bridge status      # backend health, planner tier, velocity and embedding status
+context-bridge diff [pid]  # before/after of the last two task checkpoints
+context-bridge export      # write a CLAUDE.md-compatible Markdown snapshot
 ```
 
 `context-bridge list`:
@@ -109,11 +115,19 @@ All variables can go in `~/.context-bridge/.env`.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | — | Enables the Anthropic planner |
+| `ANTHROPIC_API_KEY` | — | Enables the Anthropic planner and embedding fallback |
+| `VOYAGE_API_KEY` | — | Preferred key for semantic embeddings (Voyage AI) |
 | `OLLAMA_HOST` | auto-detected | Set if Ollama isn't at `localhost:11434` |
 | `OLLAMA_MODEL` | `qwen2.5-coder:7b` | Model for the Ollama tier |
 | `DB_PATH` | `~/.context-bridge/checkpoints.db` | SQLite database path |
 | `SERVER_PORT` | `7723` | Backend port |
+
+To enable semantic search, install the extra and set either key:
+
+```bash
+pip install "claude-context-bridge[semantic]"
+export VOYAGE_API_KEY=...   # or ANTHROPIC_API_KEY
+```
 
 ## Why not just use CLAUDE.md?
 
@@ -136,7 +150,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-42 tests cover every endpoint. The active package is `server/` (hooks in `server/hook.py`, planner tiers in `server/planner.py`). Issues and PRs welcome: [open issues](https://github.com/pushkalkumar/context-bridge/issues).
+97 tests cover every endpoint and feature. The active package is `server/` (hooks in `server/hook.py`, planner tiers in `server/planner.py`). Issues and PRs welcome: [open issues](https://github.com/pushkalkumar/context-bridge/issues).
 
 ## License
 

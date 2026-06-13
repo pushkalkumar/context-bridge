@@ -31,9 +31,10 @@ class CheckpointIn(BaseModel):
     blockers: list[str] = Field(default_factory=list)
     next_intended_action: str = ""
     event_type: EventType = EventType.CHECKPOINT
-    # adr: decision, reason, tradeoff | failure: attempted, failed_because
-    # outcome: goal, change_made, result
     event_data: dict = Field(default_factory=dict)
+    # New in v0.5.0 — optional, server computes if absent
+    checkpoint_type: str | None = None      # 'scratch' | 'task' | 'session'
+    completed_at_ts: int | None = None      # unix milliseconds
 
 
 class CheckpointAck(BaseModel):
@@ -42,11 +43,11 @@ class CheckpointAck(BaseModel):
 
 
 class StagnationReport(BaseModel):
-    stuck_since: str          # timestamp of earliest checkpoint with the stuck task
+    stuck_since: str
     elapsed_hours: float
-    primary_blocker: str      # "" when no blocker recorded
+    primary_blocker: str
     recommendation: str
-    checkpoint_count: int     # checkpoints matching the stuck task
+    checkpoint_count: int
 
 
 class SyncResponse(BaseModel):
@@ -57,6 +58,19 @@ class SyncResponse(BaseModel):
     source: Literal["anthropic", "ollama", "rule-based"]
     stagnation_count: int = 0
     stagnation_report: StagnationReport | None = None
+    # Structured planner output — v0.5.0
+    confidence: float = 1.0
+    alternatives: list[str] = Field(default_factory=list)
+    blocker_class: str | None = None
+    decomposition_suggested: bool = False
+
+
+class VelocityReport(BaseModel):
+    avg_duration_ms: float | None
+    current_duration_ms: float | None
+    velocity_ratio: float | None
+    alert: bool
+    alert_reason: str
 
 
 class RecurringItem(BaseModel):
@@ -71,9 +85,9 @@ class FileHotspot(BaseModel):
 
 class PatternsReport(BaseModel):
     project_id: str
-    hotspot_files: list[FileHotspot]        # modified across 3+ checkpoints
-    recurring_blockers: list[RecurringItem]  # appeared 2+ times
-    recurring_tasks: list[RecurringItem]     # recurred 3+ times without resolution
+    hotspot_files: list[FileHotspot]
+    recurring_blockers: list[RecurringItem]
+    recurring_tasks: list[RecurringItem]
 
 
 class RejectedApproach(BaseModel):
@@ -83,28 +97,80 @@ class RejectedApproach(BaseModel):
 
 
 class DeveloperProfile(BaseModel):
+    # Original fields — kept for backward compatibility
     project_count: int
     checkpoint_count: int
-    top_file_types: list[RecurringItem]      # extension frequency, e.g. ".py"
+    top_file_types: list[RecurringItem]
     common_blockers: list[RecurringItem]
-    tech_patterns: list[RecurringItem]       # stack names from ADR architecture notes
+    tech_patterns: list[RecurringItem]
     rejected_approaches: list[RejectedApproach]
+    # New computed fields — v0.5.0
+    avg_task_velocity_ms: float | None = None
+    preferred_stack: list[str] = Field(default_factory=list)
+    recurring_blocker_classes: list[RecurringItem] = Field(default_factory=list)
+    total_task_checkpoints: int = 0
+    total_projects: int = 0
 
 
 class ProjectSummary(BaseModel):
     project_id: str
     checkpoint_count: int
     last_active: str
-    stagnation_count: int = 0  # from the latest checkpoint
+    stagnation_count: int = 0
+    type_breakdown: dict[str, int] = Field(default_factory=dict)
 
 
 class ProjectStats(BaseModel):
     total_projects: int
     total_checkpoints: int
-    stagnation_events: int  # checkpoints where stagnation_count >= 3
+    stagnation_events: int
 
+
+# ── Search (Task 4) ────────────────────────────────────────────────────────────
+
+class SearchRequest(BaseModel):
+    query: str
+    limit: int = 5
+    exclude_project_id: str | None = None
+
+
+class SearchResult(BaseModel):
+    project_id: str
+    branch: str
+    task_summary: str
+    checkpoint_type: str
+    similarity: float
+    completed_at_ts: int | None
+    planner_next_instruction: str
+
+
+class SearchResponse(BaseModel):
+    results: list[SearchResult]
+
+
+# ── Diff (Task 5) ─────────────────────────────────────────────────────────────
+
+class CheckpointDiff(BaseModel):
+    task_summary: str
+    completed_at_ts: int | None
+    planner_confidence: float | None
+    planner_blocker_class: str | None
+    planner_decomposition_suggested: bool
+    task_duration_ms: int | None
+
+
+class DiffResponse(BaseModel):
+    from_checkpoint: CheckpointDiff = Field(alias="from")
+    to_checkpoint: CheckpointDiff = Field(alias="to")
+    next_instruction: str
+    priority_focus: list[str]
+
+    model_config = ConfigDict(populate_by_name=True)
+
+
+# ── Shared error envelope ─────────────────────────────────────────────────────
 
 class ErrorResponse(BaseModel):
-    error: str       # snake_case machine-readable code
-    message: str     # human-readable explanation
+    error: str
+    message: str
     details: dict | None = None

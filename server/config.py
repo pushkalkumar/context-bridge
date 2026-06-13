@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     anthropic_api_key: str | None = None
+    voyage_api_key: str | None = None          # Voyage AI key for embeddings; falls back to anthropic_api_key
     # Set OLLAMA_HOST to use Ollama. Leave unset to auto-detect localhost:11434.
     ollama_host: str | None = None
     ollama_model: str = "qwen2.5-coder:7b"
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
         except Exception:
             pass
         return None
+
+    def embedding_api_key(self) -> str | None:
+        """Voyage AI key for embeddings: VOYAGE_API_KEY > ANTHROPIC_API_KEY."""
+        return self.voyage_api_key or self.anthropic_api_key
 
 
 settings = Settings()

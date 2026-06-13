@@ -24,6 +24,8 @@ BASE_URL = os.environ.get("CONTEXT_BRIDGE_URL", "http://127.0.0.1:7723")
 _STATE_DIR = Path("/tmp/context-bridge-hooks")
 _TASK_TOOL_NAMES = {"Task", "task"}
 
+_SEARCH_SIMILARITY_THRESHOLD = 0.75
+
 
 # ── Session state ─────────────────────────────────────────────────────────────
 
@@ -48,7 +50,7 @@ def _write(sid: str, key: str, value: str) -> None:
 # ── Project ID ────────────────────────────────────────────────────────────────
 
 def _project_id() -> str:
-    """Stable ID: reponame/branch (e.g. my-app/main). No date suffix — history is continuous."""
+    """Stable ID: reponame/branch (e.g. my-app/main). No date suffix."""
     try:
         remote = subprocess.check_output(
             ["git", "remote", "get-url", "origin"],
@@ -82,8 +84,11 @@ def _git_meta() -> dict:
         meta["git_log_recent"] = subprocess.check_output(
             ["git", "log", "--oneline", "-5"], stderr=subprocess.DEVNULL, text=True,
         ).strip()
+        # New: name-status for new-file detection in checkpoint_type classification
+        meta["git_name_status"] = subprocess.check_output(
+            ["git", "diff", "--name-status", "HEAD"], stderr=subprocess.DEVNULL, text=True,
+        ).strip()
     except Exception:
-        # Not a git repo — mtime scan for files changed in last hour
         try:
             cwd = Path.cwd()
             cutoff = datetime.now().timestamp() - 3600
@@ -141,33 +146,91 @@ def _validate(response) -> bool:
     return True
 
 
+# ── Semantic search (Task 4) ──────────────────────────────────────────────────
+
+def _related_work_lines(next_instr: str, current_pid: str) -> list[str]:
+    """Query /search and format a RELATED PAST WORK block if similarity >= threshold."""
+    if not next_instr.strip():
+        return []
+    results = _post("/search", {
+        "query": next_instr[:500],
+        "limit": 3,
+        "exclude_project_id": current_pid,
+    })
+    if not results or not isinstance(results.get("results"), list):
+        return []
+    for r in results["results"]:
+        if r.get("similarity", 0) >= _SEARCH_SIMILARITY_THRESHOLD:
+            pid = r.get("project_id", "")
+            ts = r.get("completed_at_ts")
+            if ts:
+                try:
+                    dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+                    diff_s = (datetime.now(timezone.utc) - dt).total_seconds()
+                    if diff_s < 86400:
+                        age = f"{int(diff_s // 3600)}h ago"
+                    else:
+                        age = f"{int(diff_s // 86400)} days ago"
+                except Exception:
+                    age = "recently"
+            else:
+                age = "previously"
+            sim = r.get("similarity", 0)
+            task_summary = r.get("task_summary", "")
+            planner_instr = r.get("planner_next_instruction", "")
+            lines = [f"📎 RELATED PAST WORK (from {pid}, {age}, similarity {sim:.2f}):"]
+            if task_summary:
+                lines.append(f"  Task: {task_summary}")
+            if planner_instr:
+                lines.append(f"  What worked: {planner_instr}")
+            return lines
+    return []
+
+
 # ── SessionStart ──────────────────────────────────────────────────────────────
 
 def _profile_lines() -> list[str]:
-    """Brief cross-project developer profile, shown when a project has no history."""
+    """Computed cross-project developer profile, shown when a project has no history."""
     profile = _get("/profile")
-    if not profile or not profile.get("checkpoint_count"):
+    if not profile or not (profile.get("checkpoint_count") or profile.get("total_task_checkpoints")):
         return []
-    lines = ["[context-bridge] Developer profile active (built from prior projects):"]
-    stack = [t["text"] for t in profile.get("tech_patterns", [])[:5]]
+
+    total_tasks = profile.get("total_task_checkpoints") or profile.get("checkpoint_count", 0)
+    total_projects = profile.get("total_projects") or profile.get("project_count", 0)
+
+    lines = [f"🧑‍💻 DEVELOPER PROFILE (computed from {total_tasks} tasks across {total_projects} projects):"]
+
+    # Preferred stack from computed field, fall back to tech_patterns
+    stack = profile.get("preferred_stack") or [t["text"] for t in profile.get("tech_patterns", [])[:5]]
     if stack:
-        lines.append(f"  Preferred stack: {', '.join(stack)}")
-    for b in profile.get("common_blockers", [])[:3]:
-        if b["count"] >= 2:
-            lines.append(f"  Known pitfall: {b['text']} (occurred {b['count']}x)")
+        lines.append(f"  Preferred stack: {', '.join(stack[:5])}")
+
+    # Recurring blocker classes from planner analysis
+    for bc in profile.get("recurring_blocker_classes", [])[:2]:
+        if bc["count"] >= 2:
+            lines.append(f"  Watch for: {bc['text']} ({bc['count']}x across projects) — you tend to accumulate this")
+
+    # Avg task velocity
+    avg_vel = profile.get("avg_task_velocity_ms")
+    if avg_vel:
+        avg_s = int(avg_vel / 1000)
+        m, s = divmod(avg_s, 60)
+        lines.append(f"  Avg task pace: {m}m {s}s — if this task is taking much longer, consider decomposing")
+
+    # Rejected approaches from failure events
     rejected = profile.get("rejected_approaches", [])
     seen: dict[str, int] = {}
     for r in rejected:
-        if r["attempted"]:
+        if r.get("attempted"):
             seen[r["attempted"]] = seen.get(r["attempted"], 0) + 1
     for attempted, count in sorted(seen.items(), key=lambda kv: -kv[1])[:3]:
         suffix = f" (abandoned in {count} prior projects)" if count > 1 else " (previously abandoned)"
         lines.append(f"  Avoid suggesting: {attempted}{suffix}")
+
     return lines if len(lines) > 1 else []
 
 
 def _pattern_lines(pid: str) -> list[str]:
-    """Recurring-signal summary appended to the restored-context injection."""
     patterns = _get(f"/projects/{pid}/patterns")
     if not patterns:
         return []
@@ -225,6 +288,12 @@ def _on_session_start(event: dict) -> None:
     if priority:
         lines.append(f"  Priority: {priority}")
     lines.extend(_pattern_lines(pid))
+
+    # Semantic search: surface related past work (Task 4)
+    related = _related_work_lines(next_instr, pid)
+    if related:
+        lines.extend(related)
+
     print("\n".join(lines))
 
 
@@ -297,6 +366,7 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
             "code_summary": "",
             "architecture_notes": "",
             "git_diff_stat": git.get("git_diff_stat"),
+            "git_name_status": git.get("git_name_status"),
             "git_log_recent": git.get("git_log_recent"),
         },
         "blockers": blockers,
@@ -330,24 +400,7 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         )
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
-def main() -> None:
-    raw = sys.stdin.read().strip()
-    if not raw:
-        return
-    try:
-        event = json.loads(raw)
-    except ValueError:
-        return
-    hook = event.get("hook_event_name") or event.get("hook_type", "")
-    if hook == "SessionStart":
-        _on_session_start(event)
-    elif hook == "PostToolUse":
-        _on_post_tool_use(event)
-    elif hook == "Stop":
-        _on_stop(event)
-
+# ── Stop ─────────────────────────────────────────────────────────────────────
 
 def _on_stop(event: dict) -> None:
     sid = event.get("session_id", "default")
@@ -383,10 +436,12 @@ def _on_stop(event: dict) -> None:
         "current_state": {
             "files_modified": files,
             "git_diff_stat": git.get("git_diff_stat"),
+            "git_name_status": git.get("git_name_status"),
             "git_log_recent": git.get("git_log_recent"),
         },
         "blockers": [],
         "next_intended_action": "Review changes on next session start",
+        "checkpoint_type": "session",  # explicitly mark Stop hook checkpoints
     }
 
     result = _post("/checkpoint", payload)
@@ -401,6 +456,25 @@ def _on_stop(event: dict) -> None:
             _sp(sid, key).unlink(missing_ok=True)
         except OSError:
             pass
+
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+def main() -> None:
+    raw = sys.stdin.read().strip()
+    if not raw:
+        return
+    try:
+        event = json.loads(raw)
+    except ValueError:
+        return
+    hook = event.get("hook_event_name") or event.get("hook_type", "")
+    if hook == "SessionStart":
+        _on_session_start(event)
+    elif hook == "PostToolUse":
+        _on_post_tool_use(event)
+    elif hook == "Stop":
+        _on_stop(event)
 
 
 if __name__ == "__main__":

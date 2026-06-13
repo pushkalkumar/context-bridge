@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # Distribution name: "context-bridge" on PyPI is an unrelated RAG package.
 # The CLI command and repo name remain "context-bridge".
 name = "claude-context-bridge"
-version = "0.4.0"
+version = "0.5.0"
 description = "Persistent memory for Claude Code — checkpoint-based replanning across sessions"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,10 +31,12 @@ dependencies = [
     "pydantic-settings",
     "anthropic>=0.30",
     "httpx",
+    "sqlite-vec>=0.1.0",
 ]
 
 [project.optional-dependencies]
 dev = ["pytest>=8", "httpx"]
+semantic = ["voyageai"]
 
 [project.urls]
 Homepage = "https://github.com/pushkalkumar/context-bridge"
