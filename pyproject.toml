@@ -7,11 +7,11 @@ build-backend = "setuptools.build_meta"
 # The CLI command and repo name remain "context-bridge".
 name = "claude-context-bridge"
 version = "0.5.0"
-description = "Persistent memory for Claude Code — checkpoint-based replanning across sessions"
+description = "Stagnation detection, velocity tracking, and session continuity for Claude Code. Checkpoints every task, detects when you're stuck, and injects the right context at the start of the next session."
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
-keywords = ["claude-code", "memory", "context", "ai-agents", "checkpoint", "replanning"]
+keywords = ["claude-code", "memory", "context", "ai-agents", "checkpoint", "replanning", "stagnation-detection", "velocity-tracking", "session-continuity"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
