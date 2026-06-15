@@ -758,3 +758,173 @@ def project_exists(project_id: str) -> bool:
             "SELECT 1 FROM checkpoints WHERE project_id = ? LIMIT 1", (project_id,)
         ).fetchone()
     return row is not None
+
+
+# ── Attempt replay (v0.7.0) ───────────────────────────────────────────────────
+
+def build_attempt_replay(project_id: str, task: str | None = None, n: int = 15) -> list[dict]:
+    """Chronological attempt history for a stagnant task.
+
+    Returns list ordered oldest-first.  Each entry:
+      {attempt, timestamp, files_modified, blockers, next_instruction,
+       duration_min, blocker_class}
+    """
+    checkpoints = get_recent_checkpoints(project_id, n=n * 3)
+    if not checkpoints:
+        return []
+
+    target_task = _normalize(task if task else checkpoints[0].get("current_task", ""))
+    if not target_task:
+        return []
+
+    matches = [
+        c for c in checkpoints
+        if _normalize(c.get("current_task", "")) == target_task
+        and c.get("checkpoint_type") not in ("scratch", "session")
+    ]
+    if not matches:
+        return []
+
+    matches = list(reversed(matches))[:n]
+
+    replay = []
+    for i, cp in enumerate(matches):
+        state = cp.get("current_state") or {}
+        planner = cp.get("_planner_output") or {}
+        duration_ms = cp.get("task_duration_ms")
+
+        raw_instr = (planner.get("next_instruction") or "").strip()
+        # Strip velocity-alert prefix so the replay shows the actual plan
+        if raw_instr.startswith("⚠"):
+            clean_lines = [
+                ln for ln in raw_instr.splitlines()
+                if not ln.startswith("⚠") and not ln.strip().startswith("Last 10")
+                and not ln.strip().startswith("Consider:")
+            ]
+            raw_instr = "\n".join(clean_lines).strip()
+        next_instr = raw_instr.split("\n")[0][:150]
+
+        replay.append({
+            "attempt":        i + 1,
+            "timestamp":      cp.get("timestamp", ""),
+            "files_modified": list((state.get("files_modified") or []))[:5],
+            "blockers":       list((cp.get("blockers") or []))[:3],
+            "next_instruction": next_instr,
+            "duration_min":   round(duration_ms / 60_000, 1) if duration_ms else None,
+            "blocker_class":  cp.get("planner_blocker_class"),
+        })
+
+    return replay
+
+
+# ── Blocker history lookup (v0.7.0) ──────────────────────────────────────────
+
+_BLOCKER_FILLER = frozenset({
+    "error:", "failed:", "blocked:", "unable", "could", "cannot", "can't",
+    "the", "a", "an", "in", "at", "of", "to", "is", "are", "was", "were",
+    "not", "no", "and", "or", "but", "with", "for", "on", "it", "that",
+})
+
+
+def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict | None:
+    """Scan project history for a similar error and whether it was resolved.
+
+    Scoring: keyword overlap.  Returns the best match at >= 50% word overlap
+    or None.  The caller may include this in the /sync response.
+    """
+    if not new_blocker or len(new_blocker) < 8:
+        return None
+
+    checkpoints = get_recent_checkpoints(project_id, n=n)
+    if len(checkpoints) < 2:
+        return None
+
+    new_lower = new_blocker.lower()
+    key_words = {
+        w.strip("'\",.;:") for w in new_lower.split()
+        if w not in _BLOCKER_FILLER and len(w) > 3
+    }
+    if not key_words:
+        return None
+
+    best_match: dict | None = None
+    best_score = 0.0
+
+    # checkpoints[0] is the current / newest checkpoint — skip it
+    for i, cp in enumerate(checkpoints[1:], start=1):
+        for hist_blocker in cp.get("blockers") or []:
+            hist_lower = hist_blocker.lower()
+            matched = sum(1 for w in key_words if w in hist_lower)
+            score = matched / len(key_words)
+
+            if score >= 0.5 and score > best_score:
+                # Was it resolved?  The checkpoint at index i-1 (newer) shows what came next.
+                next_cp = checkpoints[i - 1]
+                next_blockers = next_cp.get("blockers") or []
+                still_blocking = any(
+                    sum(1 for w in key_words if w in b.lower()) / len(key_words) >= 0.4
+                    for b in next_blockers
+                )
+                resolved = not still_blocking
+
+                planner = cp.get("_planner_output") or {}
+                raw_instr = (planner.get("next_instruction") or "").strip()
+                if raw_instr.startswith("⚠"):
+                    raw_instr = "\n".join(
+                        ln for ln in raw_instr.splitlines()
+                        if not ln.startswith("⚠") and not ln.strip().startswith("Last 10")
+                        and not ln.strip().startswith("Consider:")
+                    ).strip()
+                next_instr = raw_instr.split("\n")[0][:150]
+
+                best_match = {
+                    "matched_blocker": hist_blocker[:200],
+                    "next_instruction": next_instr,
+                    "resolved": resolved,
+                    "timestamp": cp.get("timestamp", ""),
+                }
+                best_score = score
+
+    return best_match
+
+
+# ── Goal drift detection (v0.7.0) ─────────────────────────────────────────────
+
+_SKIP_GOALS = frozenset({
+    _normalize("(not yet recorded — use /sync to set)"),
+    _normalize("session ended"),
+    _normalize("end of session"),
+    _normalize("review changes on next session start"),
+})
+
+
+def detect_goal_drift(project_id: str, n: int = 10) -> dict:
+    """Detect when user_goal changes frequently across recent checkpoints.
+
+    Returns {drifted: bool, goals: list[str], distinct_count: int}
+    Drifted = True when >= 3 distinct goals in the window.
+    """
+    checkpoints = get_recent_checkpoints(project_id, n=n)
+    if not checkpoints:
+        return {"drifted": False, "goals": [], "distinct_count": 0}
+
+    seen_norms: list[str] = []
+    display_goals: list[str] = []
+
+    for cp in reversed(checkpoints):  # oldest-first
+        goal = (cp.get("user_goal") or "").strip()
+        if not goal:
+            continue
+        norm = _normalize(goal)
+        if norm in _SKIP_GOALS:
+            continue
+        if not seen_norms or seen_norms[-1] != norm:
+            seen_norms.append(norm)
+            display_goals.append(goal[:100])
+
+    distinct_count = len(seen_norms)
+    return {
+        "drifted": distinct_count >= 3,
+        "goals": display_goals[-5:],
+        "distinct_count": distinct_count,
+    }

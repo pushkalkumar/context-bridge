@@ -21,7 +21,11 @@ class PlannerOutput:
 # ── Prompt ────────────────────────────────────────────────────────────────────
 
 def _build_prompt(
-    user_goal: str, history: list[dict], current: dict, stagnation_report: dict | None = None
+    user_goal: str,
+    history: list[dict],
+    current: dict,
+    stagnation_report: dict | None = None,
+    attempt_replay: list[dict] | None = None,
 ) -> str:
     history = history[:10]
     history_lines = "\n".join(
@@ -51,6 +55,25 @@ def _build_prompt(
             f"primary_blocker: {stagnation_report['primary_blocker'] or 'none recorded'}\n"
             f"recommendation: {stagnation_report['recommendation']}\n\n"
         )
+
+    attempt_section = ""
+    if attempt_replay and len(attempt_replay) >= 2:
+        replay_lines = "\n".join(
+            "  Attempt {n} ({ts}): files=[{f}] blockers={b} → plan_was: {p}".format(
+                n=a["attempt"],
+                ts=a["timestamp"][:10],
+                f=", ".join(a["files_modified"][:3]) or "none",
+                b=a["blockers"][:1] or "none",
+                p=a["next_instruction"][:80] or "(none)",
+            )
+            for a in attempt_replay
+        )
+        attempt_section = (
+            "## ATTEMPT HISTORY (do NOT repeat any of these failed approaches)\n"
+            + replay_lines
+            + "\n\n"
+        )
+
     return (
         "You are a coding project planner. Return a JSON plan for the current checkpoint.\n\n"
         f"## Goal\n{user_goal}\n\n"
@@ -63,6 +86,7 @@ def _build_prompt(
         f"blockers: {', '.join(current.get('blockers', [])) or 'none'}\n"
         f"next_intended: {current.get('next_intended_action', '')}\n"
         f"stagnation_count: {current.get('stagnation_count', 1)}\n\n"
+        + attempt_section
         + stagnation_section
         + "If the same task recurs across checkpoints, address why it is stuck and force decomposition.\n\n"
         "Return ONLY valid JSON with these exact keys:\n"
@@ -107,14 +131,17 @@ def _sync_response_from_data(
 # ── Tier 1: Anthropic ─────────────────────────────────────────────────────────
 
 def _run_anthropic(
-    checkpoint: dict, history: list[dict], stagnation_report: dict | None = None
+    checkpoint: dict,
+    history: list[dict],
+    stagnation_report: dict | None = None,
+    attempt_replay: list[dict] | None = None,
 ) -> SyncResponse | None:
     if not settings.anthropic_api_key:
         return None
     try:
         import anthropic
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
-        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report)
+        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report, attempt_replay)
         msg = client.messages.create(
             model="claude-sonnet-4-6",
             max_tokens=1024,
@@ -141,14 +168,17 @@ def _run_anthropic(
 # ── Tier 2: Ollama ────────────────────────────────────────────────────────────
 
 def _run_ollama(
-    checkpoint: dict, history: list[dict], stagnation_report: dict | None = None
+    checkpoint: dict,
+    history: list[dict],
+    stagnation_report: dict | None = None,
+    attempt_replay: list[dict] | None = None,
 ) -> SyncResponse | None:
     host = settings.resolved_ollama_host()
     if not host:
         return None
     try:
         import httpx
-        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report)
+        prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report, attempt_replay)
         r = httpx.post(
             f"{host}/api/chat",
             json={
@@ -291,10 +321,11 @@ def run_planner(
     history: list[dict],
     stagnation_count: int,
     stagnation_report: dict | None = None,
+    attempt_replay: list[dict] | None = None,
 ) -> SyncResponse:
     result = (
-        _run_anthropic(checkpoint, history, stagnation_report)
-        or _run_ollama(checkpoint, history, stagnation_report)
+        _run_anthropic(checkpoint, history, stagnation_report, attempt_replay)
+        or _run_ollama(checkpoint, history, stagnation_report, attempt_replay)
         or _rule_based(checkpoint, history, stagnation_count, stagnation_report)
     )
     if stagnation_report:

@@ -5,6 +5,52 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.7.0] - 2026-06-14
+
+### Added
+- **Cross-session attempt replay** — when `stagnation_count >= 2`, `GET /projects/{id}/replay` returns an ordered chronological list of every past attempt on the stagnant task: files modified, blockers hit, planner plan, and duration. Injected into the planner prompt with "do NOT repeat any of these approaches" so the LLM breaks stuck loops instead of looping. Also shown at SessionStart when stagnant, and available via `context-bridge replay` CLI.
+- **Blocker history matching** — after every `/sync`, if the payload includes blockers, `find_similar_blocker()` scans project history for keyword overlap (≥50%) and returns whether a similar error was previously resolved and what fix was used. Surfaced as `⚠ Recurring error` / `⚠ Persistent error` in PostToolUse output so repeated errors are caught immediately.
+- **Goal drift detection** — `GET /projects/{id}/goal-drift` detects when `user_goal` changes 3+ times in recent checkpoints (skipping placeholder goals) and returns `{drifted, goals, distinct_count}`. Warning injected at SessionStart when drifted, prompting the user to confirm the current goal before work begins.
+- **Git-coherent session start** — SessionStart now injects current repo state (recent commits, uncommitted diff stat) alongside the restored context. Gives Claude accurate awareness of what changed since the last session without relying solely on checkpoint history.
+- **`context-bridge replay` CLI command** — prints the attempt history for the current project's stagnant task in the terminal. Complements `context-bridge why` for manual diagnosis.
+- **Three new API endpoints**: `GET /projects/{id}/replay` → `AttemptReplay`; `GET /projects/{id}/goal-drift` → `GoalDriftReport`; `GET /projects/{id}/blocker-history?q=...` → `BlockerMatch | null`.
+- **New Pydantic models**: `AttemptEntry`, `AttemptReplay`, `BlockerMatch`, `GoalDriftReport`; `blocker_match` field added to `SyncResponse`.
+- 29 new tests (141 total): `test_attempt_replay.py` (10), `test_blocker_history.py` (9), `test_goal_drift.py` (10).
+
+### Changed
+- SessionStart output now grouped into three distinct blocks: restored context, current repo state, and (when applicable) attempt history / goal drift warnings — so each category is scannable independently.
+- `skill/CLAUDE.md` restructured: added attempt replay handling protocol (§9), goal drift handling (§10), blocker match response protocol (§11), failure/ADR/outcome event recording guidance, and `context-bridge replay` command reference.
+- Planner prompt now includes full attempt history when `stagnation_count >= 2`, forcing the LLM to reason about failed approaches rather than repeating them.
+- Version bumped to `0.7.0` in `pyproject.toml` and `app.version`.
+- PyPI description updated to reflect the full v0.7.0 feature set.
+
+### Upgrade notes
+No schema migrations required — all new features read from existing checkpoint data. Re-run `context-bridge install` to pick up the updated hook binary (SessionStart changes require no hook re-install, but it's good practice).
+
+---
+
+## [0.6.0] - 2026-06-14
+
+### Added
+- **PreToolUse hook** — fires before every `Task` tool call and checks if the incoming task matches a stagnant pattern in the project's checkpoint history. When `stagnation_count >= 2` on the most recent matching checkpoint, Claude receives a structured warning (blocker class, last recorded error, previous plan) before the task starts — catching stuck loops before they accumulate rather than after. Uses a 1-second timeout so a downed backend adds no meaningful latency. The hook is wired automatically by `context-bridge install`.
+- **`context-bridge why` command** — prints a stagnation diagnosis + velocity report for the current project in a single compact view. Shows task name, session count, elapsed time, recorded blocker, recommended action, and current velocity vs. baseline. Intended as the first command to run when Claude appears stuck.
+- **Planner intelligence surfaced in PostToolUse output** — when the planner returns `confidence < 0.75`, a non-`none` `blocker_class`, or `decomposition_suggested: true`, these signals are now printed inline after the checkpoint confirmation line. First `alternatives` entry is also shown when present.
+- **Stagnation report reformatted as structured block** — the stagnation report in PostToolUse output is now multi-line with separate `Blocker:` and `Action:` fields rather than a single concatenated line, making it scannable at a glance.
+- 15 new tests (112 total): `tests/test_pre_tool_use.py` (10 tests covering no-op paths, warning conditions, blocker label mapping, normalization, and dispatch); `tests/test_why_command.py` (5 tests covering no stagnation, approaching stagnation, full stagnation with velocity, backend down, and insufficient history).
+
+### Changed
+- `context-bridge install` now wires four hooks: `SessionStart`, `PreToolUse`, `PostToolUse`, `Stop`.
+- `context-bridge status` now shows current stagnation health (which projects are stuck right now) instead of a historical event count.
+- `context-bridge install` output labels the PreToolUse hook with its purpose: `(cross-session stagnation warning)`.
+- `skill/CLAUDE.md` extended with response contract fields for `confidence`, `blocker_class`, `decomposition_suggested`, and `alternatives`; PreToolUse warning handling; velocity awareness protocol; and blocker class action table.
+- `_get()` in `hook.py` now accepts a `timeout` parameter (default 5s). PreToolUse handler uses 1s to avoid blocking tool use when the backend is unreachable.
+- FastAPI `app.version` updated to `0.6.0`.
+
+### Upgrade notes
+Existing installations need to re-run `context-bridge install` to wire the PreToolUse hook into `~/.claude/settings.json`.
+
+---
+
 ## [0.5.0] - 2026-06-13
 
 ### Added

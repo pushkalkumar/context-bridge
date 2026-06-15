@@ -110,9 +110,9 @@ def _git_meta() -> dict:
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 
-def _get(path: str):
+def _get(path: str, timeout: float = 5.0):
     try:
-        with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=5) as r:
+        with urllib.request.urlopen(f"{BASE_URL}{path}", timeout=timeout) as r:
             return json.loads(r.read())
     except Exception:
         return None
@@ -144,6 +144,72 @@ def _validate(response) -> bool:
         )
         return False
     return True
+
+
+# ── PreToolUse ────────────────────────────────────────────────────────────────
+
+_BLOCKER_CLASS_LABELS = {
+    "technical_debt": "same files changing repeatedly without resolution",
+    "dependency":     "blocked on something external to the codebase",
+    "unclear_spec":   "acceptance criteria are ambiguous",
+    "scope_creep":    "task has grown beyond its original boundary",
+}
+
+
+def _on_pre_tool_use(event: dict) -> None:
+    """Warn before a Task tool fires if the incoming task matches a stagnant pattern."""
+    if event.get("tool_name") not in _TASK_TOOL_NAMES:
+        return
+
+    tool_input = event.get("tool_input") or {}
+    incoming_task = (
+        tool_input.get("description") or str(tool_input.get("prompt", ""))
+    ).strip()[:200]
+    if not incoming_task:
+        return
+
+    sid = event.get("session_id", "default")
+    pid = _read(sid, "project_id") or _project_id()
+
+    # Use a short timeout — PreToolUse fires before every tool, so a downed backend
+    # must not add multi-second latency before each task.
+    history = _get(f"/history/{pid}?limit=1", timeout=1.0)
+    if not history:
+        return
+
+    latest = history[0]
+    prev_task = (latest.get("current_task") or "").strip()
+    prev_stag = latest.get("stagnation_count", 1)
+
+    def _norm(t: str) -> str:
+        return " ".join(t.lower().split())
+
+    if _norm(incoming_task) != _norm(prev_task) or prev_stag < 2:
+        return
+
+    # This attempt would push stagnation_count to prev_stag + 1 (>= 3)
+    planner = latest.get("_planner_output") or {}
+    blockers = latest.get("blockers") or []
+    blocker_class = (latest.get("planner_blocker_class") or "none").strip()
+
+    lines = [
+        f"\n[context-bridge] ⚠ STAGNATION RISK — '{incoming_task[:70]}' "
+        f"has appeared {prev_stag}× in recent history.",
+    ]
+    if blockers:
+        lines.append(f"  Last recorded blocker: {blockers[0][:120]}")
+    if blocker_class and blocker_class != "none":
+        label = _BLOCKER_CLASS_LABELS.get(blocker_class, blocker_class)
+        lines.append(f"  Pattern type: {label}")
+    prev_instr = (planner.get("next_instruction") or "").strip()
+    if prev_instr and not prev_instr.startswith("⚠"):
+        first_line = prev_instr.split("\n")[0][:140]
+        lines.append(f"  Previous plan: {first_line}")
+    lines.append(
+        "  Decompose into the smallest completable subtask before starting."
+        " Run `context-bridge why` for root-cause analysis.\n"
+    )
+    print("\n".join(lines))
 
 
 # ── Semantic search (Task 4) ──────────────────────────────────────────────────
@@ -245,6 +311,75 @@ def _pattern_lines(pid: str) -> list[str]:
     return lines
 
 
+def _git_state_lines() -> list[str]:
+    """Current repo state: recent commits + uncommitted changes.  (v0.7.0)"""
+    lines = []
+    try:
+        log = subprocess.check_output(
+            ["git", "log", "--oneline", "-5"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if log:
+            lines.append("  Recent commits:")
+            for commit in log.splitlines():
+                lines.append(f"    {commit}")
+    except Exception:
+        pass
+
+    try:
+        stat = subprocess.check_output(
+            ["git", "diff", "--stat", "HEAD"],
+            stderr=subprocess.DEVNULL, text=True,
+        ).strip()
+        if stat:
+            lines.append("  Uncommitted changes:")
+            for line in stat.splitlines()[-5:]:  # last 5 lines (summary)
+                lines.append(f"    {line}")
+    except Exception:
+        pass
+
+    return lines
+
+
+def _attempt_replay_lines(pid: str, stagnation_count: int) -> list[str]:
+    """Compact attempt history injected when stagnation >= 2.  (v0.7.0)"""
+    if stagnation_count < 2:
+        return []
+    replay = _get(f"/projects/{pid}/replay", timeout=2.0)
+    if not replay or not isinstance(replay.get("attempts"), list):
+        return []
+    attempts = replay["attempts"]
+    if len(attempts) < 2:
+        return []
+
+    lines = [f"\n[context-bridge] ⚠ ATTEMPT HISTORY ({len(attempts)} sessions on this task):"]
+    for a in attempts:
+        ts = a.get("timestamp", "")[:10]
+        files = ", ".join(a.get("files_modified", [])[:3]) or "none"
+        blockers = a.get("blockers", [])
+        b_str = f"  blocker: {blockers[0][:60]}" if blockers else ""
+        dur = f" ({a['duration_min']}m)" if a.get("duration_min") else ""
+        lines.append(f"  Attempt {a['attempt']} ({ts}){dur}: {files}{b_str}")
+
+    lines.append("  Do NOT repeat a previous approach. Run `context-bridge replay` for full details.")
+    return lines
+
+
+def _goal_drift_lines(pid: str) -> list[str]:
+    """Goal drift warning injected when >= 3 distinct goals seen recently.  (v0.7.0)"""
+    drift = _get(f"/projects/{pid}/goal-drift", timeout=2.0)
+    if not drift or not drift.get("drifted"):
+        return []
+    goals = drift.get("goals", [])
+    if len(goals) < 3:
+        return []
+    lines = [f"\n[context-bridge] ⚠ GOAL DRIFT ({drift['distinct_count']} goals in recent sessions):"]
+    for g in goals[-4:]:
+        lines.append(f"  → '{g}'")
+    lines.append("  Confirm the current goal is still what you intend to ship.")
+    return lines
+
+
 def _on_session_start(event: dict) -> None:
     sid = event.get("session_id", "default")
     pid = _project_id()
@@ -271,6 +406,7 @@ def _on_session_start(event: dict) -> None:
     next_instr = (planner.get("next_instruction") or "").strip()
     ctx = (planner.get("context_summary") or "").strip()
     priority = (planner.get("priority_focus") or "").strip()
+    stagnation_count = latest.get("stagnation_count", 1)
 
     if priority:
         _write(sid, "priority", priority)
@@ -289,12 +425,28 @@ def _on_session_start(event: dict) -> None:
         lines.append(f"  Priority: {priority}")
     lines.extend(_pattern_lines(pid))
 
-    # Semantic search: surface related past work (Task 4)
+    # Semantic search: surface related past work
     related = _related_work_lines(next_instr, pid)
     if related:
         lines.extend(related)
 
+    # Git-coherent context: current repo state
+    git_lines = _git_state_lines()
+    if git_lines:
+        lines.append("\n[context-bridge] Current repo state:")
+        lines.extend(git_lines)
+
     print("\n".join(lines))
+
+    # Attempt replay when stagnant (printed separately for visibility)
+    replay_lines = _attempt_replay_lines(pid, stagnation_count)
+    if replay_lines:
+        print("\n".join(replay_lines))
+
+    # Goal drift warning
+    drift_lines = _goal_drift_lines(pid)
+    if drift_lines:
+        print("\n".join(drift_lines))
 
 
 # ── PostToolUse ───────────────────────────────────────────────────────────────
@@ -386,18 +538,55 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
     if priority and priority != old_p:
         print(f"[context-bridge] Checkpoint saved. Priority: {priority}")
     elif next_instr:
-        print(f"[context-bridge] Checkpoint saved. Next: {next_instr[:120]}")
+        display = next_instr.lstrip("⚠").strip()
+        first_line = display.split("\n")[0][:120]
+        print(f"[context-bridge] Checkpoint saved. Next: {first_line}")
     else:
         print("[context-bridge] Checkpoint saved.")
 
+    # Surface planner intelligence when noteworthy
+    confidence = response.get("confidence")
+    blocker_class = (response.get("blocker_class") or "none").strip()
+    decomposition = response.get("decomposition_suggested", False)
+    alternatives = response.get("alternatives") or []
+
+    meta_parts = []
+    if confidence is not None and confidence < 0.75:
+        meta_parts.append(f"confidence {confidence:.0%}")
+    if blocker_class and blocker_class != "none":
+        meta_parts.append(f"blocker: {blocker_class}")
+    if decomposition:
+        meta_parts.append("decompose")
+    if meta_parts:
+        print(f"[context-bridge]   {' · '.join(meta_parts)}")
+    if alternatives:
+        print(f"[context-bridge]   Alt: {alternatives[0][:100]}")
+
     report = response.get("stagnation_report")
     if report:
-        print(
-            f"[context-bridge] Stagnation report: stuck since {report.get('stuck_since')} "
-            f"({report.get('elapsed_hours')}h, {report.get('checkpoint_count')} checkpoints). "
-            f"Blocker: {report.get('primary_blocker') or 'none recorded'}. "
-            f"{report.get('recommendation', '')}"
-        )
+        hours = report.get("elapsed_hours", 0)
+        count = report.get("checkpoint_count", 0)
+        blocker = report.get("primary_blocker") or "none recorded"
+        rec = report.get("recommendation", "")
+        print(f"\n[context-bridge] ⚠ STAGNATION ({count} sessions, {hours}h stuck)")
+        print(f"  Blocker: {blocker}")
+        if rec:
+            print(f"  Action:  {rec[:160]}")
+        print()
+
+    # Blocker history match: surface if this error has been seen before  (v0.7.0)
+    blocker_match = response.get("blocker_match")
+    if blocker_match:
+        mb = (blocker_match.get("matched_blocker") or "")[:80]
+        fix = (blocker_match.get("next_instruction") or "")[:120]
+        resolved = blocker_match.get("resolved", False)
+        if resolved:
+            print(f"[context-bridge] ⚠ Recurring error: '{mb}'")
+            print(f"  Previously resolved → fix was: {fix}")
+            print(f"  If it's back: verify the fix was committed/persisted.")
+        else:
+            print(f"[context-bridge] ⚠ Persistent error: '{mb}'")
+            print(f"  Seen before, never resolved. Previous plan: {fix}")
 
 
 # ── Stop ─────────────────────────────────────────────────────────────────────
@@ -471,6 +660,8 @@ def main() -> None:
     hook = event.get("hook_event_name") or event.get("hook_type", "")
     if hook == "SessionStart":
         _on_session_start(event)
+    elif hook == "PreToolUse":
+        _on_pre_tool_use(event)
     elif hook == "PostToolUse":
         _on_post_tool_use(event)
     elif hook == "Stop":

@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from .config import settings
 from .memory import (
     _SQLITE_VEC_AVAILABLE,
+    build_attempt_replay,
     build_profile,
     build_snapshot,
     build_stagnation_report,
@@ -22,7 +23,9 @@ from .memory import (
     compute_stagnation_count,
     compute_task_duration_ms,
     delete_project,
+    detect_goal_drift,
     extract_patterns,
+    find_similar_blocker,
     get_all_projects,
     get_diff_data,
     get_recent_checkpoints,
@@ -36,11 +39,15 @@ from .memory import (
     search_checkpoints,
 )
 from .models import (
+    AttemptEntry,
+    AttemptReplay,
+    BlockerMatch,
     CheckpointAck,
     CheckpointIn,
     DeveloperProfile,
     DiffResponse,
     ErrorResponse,
+    GoalDriftReport,
     PatternsReport,
     ProjectStats,
     ProjectSummary,
@@ -103,8 +110,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Context Bridge",
-    description="Persistent memory for Claude Code. Checkpoint history and replanning across sessions.",
-    version="0.5.0",
+    description="Stagnation detection, velocity tracking, and session continuity for Claude Code.",
+    version="0.7.0",
     lifespan=lifespan,
 )
 
@@ -166,7 +173,8 @@ async def sync(cp: CheckpointIn) -> SyncResponse:
 
     history = get_recent_checkpoints(data["project_id"], n=10)
     report = build_stagnation_report(data["project_id"], data["current_task"]) if stag >= 3 else None
-    result = run_planner(data, history, stag, report)
+    attempt_replay_data = build_attempt_replay(data["project_id"], data["current_task"]) if stag >= 2 else None
+    result = run_planner(data, history, stag, report, attempt_replay_data)
 
     # Velocity alert — prepend warning to next_instruction when triggered (ADR-006)
     velocity = get_velocity(data["project_id"])
@@ -184,6 +192,12 @@ async def sync(cp: CheckpointIn) -> SyncResponse:
             f"  Consider: Is this blocked? Is the scope larger than expected? Should it be decomposed?\n\n"
         )
         result.next_instruction = warning + result.next_instruction
+
+    # Blocker history match — surface if current blockers recur from history
+    if data.get("blockers"):
+        match = find_similar_blocker(data["project_id"], data["blockers"][0])
+        if match:
+            result.blocker_match = match
 
     # Store structured planner output back into the blob
     data["_planner_output"] = result.model_dump()
@@ -327,9 +341,44 @@ async def snapshot(project_id: str) -> JSONResponse:
     return JSONResponse(content={"markdown": md})
 
 
+# ── Attempt replay (v0.7.0) ───────────────────────────────────────────────────
+
+@app.get("/projects/{project_id:path}/replay", response_model=AttemptReplay)
+async def replay(project_id: str, task: str | None = None) -> AttemptReplay:
+    """Chronological attempt history for the current stagnant task."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    attempts_raw = build_attempt_replay(project_id, task=task)
+    task_name = (
+        attempts_raw[0]["timestamp"] and  # side-effect free
+        get_recent_checkpoints(project_id, n=1)[0].get("current_task", "") or task or ""
+    )
+    history = get_recent_checkpoints(project_id, n=1)
+    task_name = task or (history[0].get("current_task", "") if history else "")
+    attempts = [AttemptEntry(**a) for a in attempts_raw]
+    return AttemptReplay(task=task_name, attempt_count=len(attempts), attempts=attempts)
+
+
+@app.get("/projects/{project_id:path}/goal-drift", response_model=GoalDriftReport)
+async def goal_drift(project_id: str) -> GoalDriftReport:
+    """Goal drift analysis: detects frequent goal changes in recent sessions."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    return GoalDriftReport(**detect_goal_drift(project_id))
+
+
+@app.get("/projects/{project_id:path}/blocker-history", response_model=BlockerMatch | None)
+async def blocker_history(project_id: str, q: str = "") -> BlockerMatch | None:
+    """Find a similar historical blocker and surface whether it was resolved."""
+    if not project_exists(project_id):
+        raise _not_found(project_id)
+    result = find_similar_blocker(project_id, q)
+    return BlockerMatch(**result) if result else None
+
+
 # ── Install command ───────────────────────────────────────────────────────────
 
-_HOOK_EVENTS = ("SessionStart", "PostToolUse", "Stop")
+_HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "Stop")
 
 
 def _do_install() -> None:
@@ -355,6 +404,7 @@ def _do_install() -> None:
 
     hook_dest = str(_HOOK_DEST).replace(str(Path.home()), "~")
     print(f"✓ SessionStart hook  → {hook_dest}")
+    print(f"✓ PreToolUse hook    → {hook_dest}  (cross-session stagnation warning)")
     print(f"✓ PostToolUse hook   → {hook_dest}")
     print(f"✓ Stop hook          → {hook_dest}")
     print(f"✓ Skill imported     → CLAUDE.md ← {_SKILL_DEST.name}")
@@ -370,6 +420,7 @@ def _configure_hooks() -> None:
     hooks = settings_data.setdefault("hooks", {})
     entries = {
         "SessionStart": {"hooks": [{"type": "command", "command": hook_cmd}]},
+        "PreToolUse": {"matcher": "", "hooks": [{"type": "command", "command": hook_cmd}]},
         "PostToolUse": {"matcher": "", "hooks": [{"type": "command", "command": hook_cmd}]},
         "Stop": {"hooks": [{"type": "command", "command": hook_cmd}]},
     }
@@ -445,10 +496,19 @@ def _do_status() -> None:
     print(f"DB         {settings.db_path}")
 
     s = _fetch("/stats")
+    projects_data = _fetch("/projects") or []
     if s:
         print(f"Projects   {s['total_projects']}")
         print(f"Checkpoints {s['total_checkpoints']}")
-        print(f"Stagnation {s['stagnation_events']} events")
+
+    # Show current stagnation health (not a historical count)
+    stagnant = [p for p in projects_data if p.get("stagnation_count", 0) >= 3]
+    if stagnant:
+        names = ", ".join(p["project_id"] for p in stagnant[:3])
+        suffix = f" → run `context-bridge why`  ({names})"
+        print(f"Stagnant   {len(stagnant)} project{'s' if len(stagnant) != 1 else ''}{suffix}")
+    else:
+        print(f"Stagnant   none")
 
     planner = "rule-based (no LLM configured)"
     if settings.anthropic_api_key:
@@ -601,12 +661,151 @@ def _do_export(project_id: str, output_path: str) -> None:
     print(f"Snapshot written to {out}")
 
 
+def _current_pid() -> str:
+    """Derive project_id from git for CLI commands."""
+    import subprocess as _sp
+    try:
+        remote = _sp.check_output(
+            ["git", "remote", "get-url", "origin"], stderr=_sp.DEVNULL, text=True
+        ).strip()
+        name = remote.rstrip("/").split("/")[-1].removesuffix(".git")
+    except Exception:
+        name = Path.cwd().name or "unknown"
+    try:
+        branch = _sp.check_output(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=_sp.DEVNULL, text=True
+        ).strip()
+        return f"{name}/{branch}" if branch and branch not in ("", "HEAD") else name
+    except Exception:
+        return name
+
+
+def _do_replay() -> None:
+    """Show chronological attempt history for the current stagnant task."""
+    pid = _current_pid()
+
+    if not _fetch("/health"):
+        print("Backend not running. Start it with: context-bridge")
+        return
+
+    replay = _fetch(f"/projects/{pid}/replay")
+    if not replay or not replay.get("attempts"):
+        print(f"No attempt history found for {pid}.")
+        print("(Attempt replay requires stagnation — the same task appearing in 2+ sessions.)")
+        return
+
+    task = replay.get("task", "")
+    count = replay.get("attempt_count", 0)
+    print(f"\n  Project: {pid}")
+    print(f"  Task:    '{task}'")
+    print(f"  Attempts: {count}\n")
+
+    for a in replay["attempts"]:
+        ts = a.get("timestamp", "")[:16]
+        files = ", ".join(a.get("files_modified", [])[:3]) or "none"
+        blockers = a.get("blockers", [])
+        dur = f"  ({a['duration_min']}m)" if a.get("duration_min") else ""
+        bc = a.get("blocker_class") or ""
+        bc_str = f"  [{bc}]" if bc and bc != "none" else ""
+        plan = a.get("next_instruction", "")
+
+        print(f"  Attempt {a['attempt']}  {ts}{dur}")
+        print(f"    Files:   {files}")
+        if blockers:
+            print(f"    Blocker: {blockers[0][:100]}{bc_str}")
+        if plan:
+            print(f"    Plan:    {plan[:100]}")
+        print()
+
+
+def _do_why() -> None:
+    """Show stagnation diagnosis and velocity for the current project."""
+    pid = _current_pid()
+
+    if not _fetch("/health"):
+        print("Backend not running. Start it with: context-bridge")
+        return
+
+    print(f"\n  Project: {pid}\n")
+
+    history = _fetch(f"/history/{pid}?limit=1") or []
+    current_stag = history[0].get("stagnation_count", 1) if history else 0
+
+    if current_stag >= 3:
+        stag = _fetch(f"/projects/{pid}/stagnation-report")
+        if stag:
+            hours = stag.get("elapsed_hours", 0)
+            count = stag.get("checkpoint_count", 0)
+            blocker = stag.get("primary_blocker") or "none recorded"
+            rec = stag.get("recommendation", "")
+            current_task = (history[0].get("current_task", "") if history else "")[:60]
+            print("  ⚠ STAGNATION DETECTED")
+            if current_task:
+                print(f"  Task:    '{current_task}'")
+            print(f"  Stuck:   {count} sessions, {hours}h")
+            print(f"  Blocker: {blocker}")
+            if rec:
+                print(f"  Action:  {rec[:160]}")
+        else:
+            print("  Stagnation data unavailable.")
+    elif current_stag == 2:
+        task = (history[0].get("current_task", "") if history else "")[:60]
+        print("  ⚠ APPROACHING STAGNATION (2 sessions)")
+        if task:
+            print(f"  Task: '{task}'")
+        print("  One more attempt without completing this task triggers forced decomposition.")
+    else:
+        print("  No stagnation — current task is progressing normally.")
+
+    print()
+
+    vel = _fetch(f"/velocity/{pid}")
+    if vel and vel.get("avg_duration_ms") is not None:
+        avg_s = (vel["avg_duration_ms"] or 0) / 1000
+        cur_s = (vel.get("current_duration_ms") or 0) / 1000
+        avg_m, avg_s2 = divmod(int(avg_s), 60)
+        cur_m, cur_s2 = divmod(int(cur_s), 60)
+        ratio = vel.get("velocity_ratio")
+        alert = vel.get("alert", False)
+        ratio_str = f"  |  {ratio:.1f}×" if ratio is not None else ""
+        status = "  ⚠ slower than baseline" if alert else "  on track"
+        print(f"  Velocity: {cur_m}m {cur_s2}s current  |  {avg_m}m {avg_s2}s baseline{ratio_str}{status}")
+    else:
+        print("  Velocity: insufficient history (5+ completed tasks needed for baseline)")
+
+    print()
+
+    # Goal drift
+    drift = _fetch(f"/projects/{pid}/goal-drift")
+    if drift and drift.get("drifted"):
+        goals = drift.get("goals", [])
+        print(f"  ⚠ GOAL DRIFT ({drift['distinct_count']} distinct goals in recent sessions):")
+        for g in goals[-4:]:
+            print(f"    → '{g}'")
+        print("  Confirm the current goal is still what you intend to ship.")
+        print()
+
+    # Attempt replay summary (when stagnation exists)
+    if current_stag >= 2:
+        replay = _fetch(f"/projects/{pid}/replay")
+        if replay and replay.get("attempts") and len(replay["attempts"]) >= 2:
+            print(f"  Attempt history ({len(replay['attempts'])} sessions on this task):")
+            for a in replay["attempts"]:
+                ts = a.get("timestamp", "")[:10]
+                blockers = a.get("blockers", [])
+                b_str = f"  → {blockers[0][:70]}" if blockers else ""
+                dur = f" ({a['duration_min']}m)" if a.get("duration_min") else ""
+                print(f"    Attempt {a['attempt']} ({ts}){dur}{b_str}")
+            print(f"  Full history: context-bridge replay")
+            print()
+
+
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 def run() -> None:
     parser = argparse.ArgumentParser(
         prog="context-bridge",
-        description="Persistent memory for Claude Code.",
+        description="Stagnation detection and session continuity for Claude Code.",
     )
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install", help="Install skill + lifecycle hooks to ~/.claude/")
@@ -614,6 +813,8 @@ def run() -> None:
     sub.add_parser("start", help="Start the backend server (default)")
     sub.add_parser("status", help="Check backend status and planner configuration")
     sub.add_parser("list", help="List all projects with checkpoint counts and type breakdown")
+    sub.add_parser("why", help="Show stagnation diagnosis and velocity for the current project")
+    sub.add_parser("replay", help="Show chronological attempt history for the current stagnant task")
 
     diff_p = sub.add_parser("diff", help="Show what changed between the two most recent task checkpoints")
     diff_p.add_argument("project_id", help="Project ID (reponame/branch)")
@@ -633,6 +834,10 @@ def run() -> None:
         _do_status()
     elif args.cmd == "list":
         _do_list()
+    elif args.cmd == "why":
+        _do_why()
+    elif args.cmd == "replay":
+        _do_replay()
     elif args.cmd == "diff":
         pid = args.project_id
         if hasattr(args, "branch") and args.branch:

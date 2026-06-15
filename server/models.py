@@ -3,6 +3,18 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+# Re-export for main.py convenience
+__all__ = [
+    "EventType", "CheckpointState", "CheckpointIn", "CheckpointAck",
+    "StagnationReport", "SyncResponse", "VelocityReport",
+    "RecurringItem", "FileHotspot", "PatternsReport",
+    "RejectedApproach", "DeveloperProfile", "ProjectSummary", "ProjectStats",
+    "SearchRequest", "SearchResult", "SearchResponse",
+    "CheckpointDiff", "DiffResponse",
+    "AttemptEntry", "AttemptReplay", "BlockerMatch", "GoalDriftReport",
+    "ErrorResponse",
+]
+
 
 class EventType(str, Enum):
     CHECKPOINT = "checkpoint"          # default: timeline event
@@ -63,6 +75,8 @@ class SyncResponse(BaseModel):
     alternatives: list[str] = Field(default_factory=list)
     blocker_class: str | None = None
     decomposition_suggested: bool = False
+    # Blocker history match — v0.7.0
+    blocker_match: dict | None = None
 
 
 class VelocityReport(BaseModel):
@@ -166,6 +180,41 @@ class DiffResponse(BaseModel):
     priority_focus: list[str]
 
     model_config = ConfigDict(populate_by_name=True)
+
+
+# ── Attempt replay (v0.7.0) ───────────────────────────────────────────────────
+
+class AttemptEntry(BaseModel):
+    attempt: int
+    timestamp: str
+    files_modified: list[str]
+    blockers: list[str]
+    next_instruction: str
+    duration_min: float | None = None
+    blocker_class: str | None = None
+
+
+class AttemptReplay(BaseModel):
+    task: str
+    attempt_count: int
+    attempts: list[AttemptEntry]
+
+
+# ── Blocker history match (v0.7.0) ────────────────────────────────────────────
+
+class BlockerMatch(BaseModel):
+    matched_blocker: str
+    next_instruction: str
+    resolved: bool
+    timestamp: str
+
+
+# ── Goal drift (v0.7.0) ───────────────────────────────────────────────────────
+
+class GoalDriftReport(BaseModel):
+    drifted: bool
+    goals: list[str]
+    distinct_count: int
 
 
 # ── Shared error envelope ─────────────────────────────────────────────────────

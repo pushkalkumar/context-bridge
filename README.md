@@ -6,9 +6,40 @@
 [![Works offline](https://img.shields.io/badge/works-offline-brightgreen)](#how-it-works)
 [![PyPI](https://img.shields.io/pypi/v/claude-context-bridge)](https://pypi.org/project/claude-context-bridge/)
 
-Every Claude Code session starts blind. You opened a project you were deep in yesterday, and Claude has no idea what you were doing, what blocked you, or which decisions you already made. You explain it again — the auth flow, the reason you rejected Redis, the fact that `SECRET_KEY` must come from an environment variable. Every. Single. Session.
+Claude goes in circles. You've been working on the same blocked task for three sessions. Claude doesn't know it's stuck. You don't know the exact bottleneck. And you're about to spend another hour on the wrong approach.
 
-context-bridge ends that. It checkpoints every completed task automatically via Claude Code's lifecycle hooks, and injects the right context before Claude reads your first message.
+MEMORY.md and claude-mem solve the session blindness problem — they tell Claude what you were doing. Neither one detects that you've been trying the same broken approach for 4.2 hours across three separate sessions, warns you before the fourth attempt starts, replays every prior attempt, or diagnoses why you keep failing.
+
+context-bridge does.
+
+It checkpoints every completed task automatically, detects stagnation the moment a task appears three sessions in a row, warns Claude before it repeats a stuck attempt, replays the full history of prior attempts at session start, matches current errors against resolved historical blockers, and tracks how long your tasks take against your own rolling baseline.
+
+## What it looks like
+
+When a task has been stuck for multiple sessions, context-bridge warns Claude before the next attempt fires:
+
+```text
+[context-bridge] ⚠ STAGNATION RISK — 'Implement /login endpoint' has appeared 2× in recent history.
+  Last recorded blocker: error: cannot find module 'bcrypt'
+  Pattern type: same files changing repeatedly without resolution
+  Previous plan: Resolve the bcrypt import before adding more auth code.
+  Decompose into the smallest completable subtask before starting. Run `context-bridge why` for root-cause analysis.
+```
+
+When stagnation is confirmed (three sessions, same task), the planner forces decomposition:
+
+```text
+[context-bridge] Checkpoint saved. Next: The task 'Implement /login endpoint' has
+  appeared 3 consecutive times without completing. Pick the smallest completable
+  subtask and do only that one thing. Root cause: 'bcrypt import error'.
+  confidence 40% · blocker: technical_debt · decompose
+
+[context-bridge] ⚠ STAGNATION (3 sessions, 4.2h stuck)
+  Blocker: bcrypt import error
+  Action:  Break this into smaller tasks. Start with the failing import only.
+```
+
+At session start, context is restored before Claude reads your first message — including what changed in git since the last session:
 
 ```text
 [context-bridge] Session context restored:
@@ -17,30 +48,41 @@ context-bridge ends that. It checkpoints every completed task automatically via 
             SECRET_KEY from env, return {access_token, token_type: "bearer"}.
   Priority: SECRET_KEY must come from env — it was hardcoded in auth.py:34
   Hotspots: auth.py (5x), main.py (3x)
+
+[context-bridge] Current repo state:
+  Recent commits:
+    a3f1c20 Add /register endpoint
+    9b2e401 Add JWT token signing helper
+  Uncommitted changes:
+    auth.py | 12 ++++++------
 ```
 
-When the same task shows up three sessions in a row without completing, the stagnation detector fires and generates a root-cause report:
+When a task has been stuck across sessions, the attempt history is replayed at session start:
 
 ```text
-[context-bridge] Checkpoint saved. Next: The task 'Implement /login endpoint' has
-  appeared 3 consecutive times without completing. Pick the smallest completable
-  subtask and do only that one thing. Root cause: 'bcrypt import error'.
-
-[context-bridge] Stagnation report: stuck since 2026-06-12T10:18:00 (4.2h,
-  3 checkpoints). Blocker: bcrypt import error. Break this into smaller tasks.
+[context-bridge] ⚠ ATTEMPT HISTORY (3 sessions on this task):
+  Attempt 1 (2026-06-10) (12.0m): auth.py, routes.py  blocker: ImportError: cannot import bcrypt
+  Attempt 2 (2026-06-11) (8.0m):  auth.py             blocker: ModuleNotFoundError: bcrypt
+  Attempt 3 (2026-06-13) (22.0m): auth.py, deps.py    blocker: bcrypt version mismatch
+  Do NOT repeat a previous approach. Run `context-bridge replay` for full details.
 ```
 
-When a task is running significantly longer than your normal pace, the velocity tracker alerts before you realize you're stuck:
+When the same error has appeared before, the blocker matcher fires:
 
 ```text
-[context-bridge] Session context restored:
-  Summary:  JWT auth ~60% done. /register blocked on /login.
+[context-bridge] ⚠ Recurring error: 'bcrypt version mismatch with passlib'
+  Previously resolved → fix was: Pin bcrypt==4.0.1 in requirements.txt
+  If it's back: verify the fix was committed/persisted.
+```
+
+When a task runs significantly longer than your usual pace, the velocity tracker alerts:
+
+```text
   Next:     ⚠ VELOCITY ALERT: This task is taking 2.6x longer than your baseline on this branch.
             Last 10 tasks averaged 7m 0s. Current task has been open 18m 22s.
             Consider: Is this blocked? Is the scope larger than expected? Should it be decomposed?
 
             Implement /login: verify bcrypt hash, sign HS256 token.
-  Priority: SECRET_KEY must come from env
 ```
 
 ## Install
@@ -55,33 +97,45 @@ Or manually:
 
 ```bash
 pip install claude-context-bridge
-context-bridge install    # wires SessionStart + PostToolUse + Stop hooks into ~/.claude/settings.json
+context-bridge install    # wires SessionStart + PreToolUse + PostToolUse + Stop hooks
 context-bridge            # start the backend server (separate terminal or background process)
 ```
 
 ## How it works
 
 ```text
-Claude Code task completes
+Claude Code task about to start
+        |
+        v
+PreToolUse hook fires
+  checks if incoming task matches a stagnant pattern in history
+  if stagnation_count >= 2 in recent history: injects cross-session warning
+  includes blocker class, last recorded error, previous plan
+        |
+        v
+Task completes
         |
         v
 PostToolUse hook fires
   captures git diff, files touched, task summary, any error lines
-  classifies checkpoint type (task / scratch / ephemeral micro-edit)
+  classifies checkpoint type (task / scratch / session)
   POST /sync ──────────────────────────────> local backend (port 7723)
-                                              stagnation check (3× same task → root-cause report)
+                                              stagnation check (3× same task → forced decomposition)
                                               velocity check (2× baseline → alert prepended to instruction)
                                               planner: Anthropic → Ollama → rule-based, in that order
                                               returns: next_instruction, confidence, blocker_class, alternatives
         |
         v
-Session ends ──> Stop hook ──> session-type checkpoint (preserves end-of-session state)
+Session ends ──> Stop hook ──> session-type checkpoint
         |
 Next session starts
         |
         v
 SessionStart hook fires
   known project: injects summary, next step, active constraint, recurring hotspots
+                 injects current git state (recent commits, uncommitted diff)
+                 injects attempt history when stagnant (stagnation_count >= 2)
+                 warns on goal drift when >= 3 distinct goals in recent sessions
                  surfaces related past work from other projects (semantic search, similarity ≥ 0.75)
   new project:   injects cross-project developer profile (preferred stack, avg velocity, known pitfalls)
         |
@@ -99,9 +153,13 @@ Everything runs locally: SQLite in `~/.context-bridge/` and a FastAPI server on 
 
 ## What makes this different
 
-Most tools in this space auto-update a CLAUDE.md section or maintain a scratchpad. context-bridge does something different: it detects when you're stuck and forces a structured response, rather than letting the same blocked task accumulate silently across sessions.
+MEMORY.md (which Anthropic ships natively) and claude-mem solve session blindness — Claude knows what you were doing. That problem is solved. context-bridge solves the next problem: Claude knowing it's stuck, why it's stuck, and what to do differently.
 
-The stagnation detector counts how many consecutive checkpoints contain the same normalized task. At three, it switches from "what's next" mode to decomposition mode: it generates a root-cause analysis (stuck since when, elapsed hours, dominant blocker from the blocker history), and changes `next_instruction` to force Claude to pick the smallest completable subtask rather than retrying the whole thing. This is not a heuristic applied after the fact — it runs on every checkpoint, so it catches stagnation the moment it crosses the threshold.
+The stagnation detector counts how many consecutive checkpoints contain the same normalized task. At two, it fires a PreToolUse warning before the third attempt starts — giving Claude the blocker class, the last recorded error, and the previous plan before it writes a single line of code. At session start, if stagnation_count >= 2, it injects the full attempt replay: every prior attempt's files, blockers, and the plan that was tried. The planner prompt also receives this replay with an explicit "do NOT repeat any of these approaches" instruction, forcing the LLM to reason about why prior attempts failed rather than trying the same thing again. At stagnation_count >= 3, it switches from "what's next" mode to decomposition mode. This is the piece that MEMORY.md cannot provide — it runs on every checkpoint and catches stagnation the moment it crosses the threshold.
+
+Blocker history matching scans project checkpoint history after every `/sync` call. When the current blocker shares ≥50% keyword overlap with a historically recorded error, context-bridge identifies whether that error was resolved and what fix was used. If it was resolved but is back, the output warns that the fix didn't stick. If it was never resolved, it marks the blocker as persistent and surfaces the last plan that was tried. No other tool maintains this kind of error genealogy.
+
+Goal drift detection scans the last 10 checkpoints for changes in `user_goal`. When three or more distinct goals appear in the window, context-bridge warns at session start and asks the user to confirm the current goal before work begins. This prevents Claude from working toward an outdated objective based on stale context.
 
 Velocity tracking is a per-project, per-branch baseline computed from `task_duration_ms` stored with each checkpoint. When the current task has been open for 2× longer than your rolling average — computed from the last 10 task checkpoints — a structured alert is prepended to the planner's instruction before it reaches Claude. No other comparable tool tracks task duration at this granularity, which means no other tool can tell you "this task is unusually slow for you specifically, on this project."
 
@@ -115,10 +173,26 @@ All commands read from the same SQLite database the hooks write to — no server
 context-bridge             # start the backend server
 context-bridge install     # (re)install hooks and skill into ~/.claude/
 context-bridge uninstall   # remove hooks and skill (database is preserved)
+context-bridge why         # stagnation diagnosis and velocity report for the current project
+context-bridge replay      # show full attempt history for the current project's stagnant task
 context-bridge list        # all projects with checkpoint counts and type breakdown
 context-bridge status      # backend health, planner tier, velocity and embedding status
 context-bridge diff        # before/after of the last two task checkpoints
 context-bridge export      # write CONTEXT_BRIDGE_SNAPSHOT.md (CLAUDE.md-compatible)
+```
+
+`context-bridge why`:
+
+```text
+  Project: my-api/main
+
+  ⚠ STAGNATION DETECTED
+  Task:    'Implement /login endpoint'
+  Stuck:   3 sessions, 4.2h
+  Blocker: bcrypt import error
+  Action:  Break this into smaller tasks. Start with the failing import only.
+
+  Velocity: 18m 22s current  |  7m 0s baseline  |  2.6×  ⚠ slower than baseline
 ```
 
 `context-bridge list`:
@@ -182,7 +256,7 @@ pip install -e ".[dev]"
 pytest
 ```
 
-97 tests cover every endpoint, planner tier, checkpoint type, and CLI command. The active modules are `server/hook.py` (lifecycle hooks, session state, git metadata collection) and `server/planner.py` (three-tier planner, blocker classification, structured output). See [docs/architecture.md](docs/architecture.md) for the full decision tree and checkpoint lifecycle. Issues and PRs welcome: [open issues](https://github.com/pushkalkumar/context-bridge/issues).
+141 tests cover every endpoint, planner tier, checkpoint type, CLI command, and all v0.7.0 features (attempt replay, blocker history, goal drift). The active modules are `server/hook.py` (lifecycle hooks, session state, git metadata collection) and `server/planner.py` (three-tier planner, blocker classification, structured output). See [docs/architecture.md](docs/architecture.md) for the full decision tree and checkpoint lifecycle. Issues and PRs welcome: [open issues](https://github.com/pushkalkumar/context-bridge/issues).
 
 ## License
 
