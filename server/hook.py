@@ -173,24 +173,33 @@ def _on_pre_tool_use(event: dict) -> None:
 
     # Use a short timeout — PreToolUse fires before every tool, so a downed backend
     # must not add multi-second latency before each task.
-    history = _get(f"/history/{pid}?limit=1", timeout=1.0)
+    # Fetch enough history to find the most recent non-scratch checkpoint matching
+    # the incoming task — a scratch checkpoint in between would otherwise hide stagnation.
+    history = _get(f"/history/{pid}?limit=10", timeout=1.0)
     if not history:
         return
-
-    latest = history[0]
-    prev_task = (latest.get("current_task") or "").strip()
-    prev_stag = latest.get("stagnation_count", 1)
 
     def _norm(t: str) -> str:
         return " ".join(t.lower().split())
 
-    if _norm(incoming_task) != _norm(prev_task) or prev_stag < 2:
+    norm_incoming = _norm(incoming_task)
+    # Find the most recent checkpoint whose task matches AND is not scratch type
+    matching = next(
+        (
+            c for c in history
+            if _norm(c.get("current_task") or "") == norm_incoming
+            and c.get("checkpoint_type") != "scratch"
+        ),
+        None,
+    )
+    if matching is None or matching.get("stagnation_count", 1) < 2:
         return
 
-    # This attempt would push stagnation_count to prev_stag + 1 (>= 3)
-    planner = latest.get("_planner_output") or {}
-    blockers = latest.get("blockers") or []
-    blocker_class = (latest.get("planner_blocker_class") or "none").strip()
+    # This attempt would push stagnation_count to matching["stagnation_count"] + 1 (>= 3)
+    prev_stag = matching["stagnation_count"]
+    planner = matching.get("_planner_output") or {}
+    blockers = matching.get("blockers") or []
+    blocker_class = (matching.get("planner_blocker_class") or "none").strip()
 
     lines = [
         f"\n[context-bridge] ⚠ STAGNATION RISK — '{incoming_task[:70]}' "
@@ -333,7 +342,7 @@ def _git_state_lines() -> list[str]:
         ).strip()
         if stat:
             lines.append("  Uncommitted changes:")
-            for line in stat.splitlines()[-5:]:  # last 5 lines (summary)
+            for line in stat.splitlines()[:5]:  # first 5 lines = file names
                 lines.append(f"    {line}")
     except Exception:
         pass

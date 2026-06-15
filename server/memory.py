@@ -762,6 +762,19 @@ def project_exists(project_id: str) -> bool:
 
 # ── Attempt replay (v0.7.0) ───────────────────────────────────────────────────
 
+def _strip_velocity_prefix(text: str) -> str:
+    """Remove the ⚠ VELOCITY ALERT preamble injected by the /sync endpoint."""
+    if not text.startswith("⚠"):
+        return text
+    clean = [
+        ln for ln in text.splitlines()
+        if not ln.startswith("⚠")
+        and not ln.strip().startswith("Last 10")
+        and not ln.strip().startswith("Consider:")
+    ]
+    return "\n".join(clean).strip()
+
+
 def build_attempt_replay(project_id: str, task: str | None = None, n: int = 15) -> list[dict]:
     """Chronological attempt history for a stagnant task.
 
@@ -793,15 +806,7 @@ def build_attempt_replay(project_id: str, task: str | None = None, n: int = 15) 
         planner = cp.get("_planner_output") or {}
         duration_ms = cp.get("task_duration_ms")
 
-        raw_instr = (planner.get("next_instruction") or "").strip()
-        # Strip velocity-alert prefix so the replay shows the actual plan
-        if raw_instr.startswith("⚠"):
-            clean_lines = [
-                ln for ln in raw_instr.splitlines()
-                if not ln.startswith("⚠") and not ln.strip().startswith("Last 10")
-                and not ln.strip().startswith("Consider:")
-            ]
-            raw_instr = "\n".join(clean_lines).strip()
+        raw_instr = _strip_velocity_prefix((planner.get("next_instruction") or "").strip())
         next_instr = raw_instr.split("\n")[0][:150]
 
         replay.append({
@@ -868,13 +873,7 @@ def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict
                 resolved = not still_blocking
 
                 planner = cp.get("_planner_output") or {}
-                raw_instr = (planner.get("next_instruction") or "").strip()
-                if raw_instr.startswith("⚠"):
-                    raw_instr = "\n".join(
-                        ln for ln in raw_instr.splitlines()
-                        if not ln.startswith("⚠") and not ln.strip().startswith("Last 10")
-                        and not ln.strip().startswith("Consider:")
-                    ).strip()
+                raw_instr = _strip_velocity_prefix((planner.get("next_instruction") or "").strip())
                 next_instr = raw_instr.split("\n")[0][:150]
 
                 best_match = {

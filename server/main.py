@@ -349,10 +349,6 @@ async def replay(project_id: str, task: str | None = None) -> AttemptReplay:
     if not project_exists(project_id):
         raise _not_found(project_id)
     attempts_raw = build_attempt_replay(project_id, task=task)
-    task_name = (
-        attempts_raw[0]["timestamp"] and  # side-effect free
-        get_recent_checkpoints(project_id, n=1)[0].get("current_task", "") or task or ""
-    )
     history = get_recent_checkpoints(project_id, n=1)
     task_name = task or (history[0].get("current_task", "") if history else "")
     attempts = [AttemptEntry(**a) for a in attempts_raw]

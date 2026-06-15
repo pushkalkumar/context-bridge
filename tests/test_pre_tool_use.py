@@ -163,6 +163,47 @@ def test_warning_normalization_is_case_insensitive(hook, capsys):
     assert "STAGNATION RISK" in out
 
 
+# ── Scratch checkpoint interleaving ──────────────────────────────────────────
+
+def test_warning_fires_when_scratch_checkpoint_is_newest(hook, capsys):
+    """Stagnation on a task should still warn even when a scratch checkpoint
+    is the most recent entry — the fix searches beyond the first row."""
+    history = [
+        # Newest: scratch checkpoint on a different task — should be skipped
+        {"current_task": "Minor formatting tweak", "stagnation_count": 1,
+         "checkpoint_type": "scratch", "blockers": [], "planner_blocker_class": "none",
+         "_planner_output": {}},
+        # Older: task checkpoint showing stagnation
+        {"current_task": "Implement /login", "stagnation_count": 3,
+         "checkpoint_type": "task", "blockers": ["bcrypt error"],
+         "planner_blocker_class": "technical_debt",
+         "_planner_output": {"next_instruction": "Fix the import first"}},
+    ]
+    with patch.object(hook, "_get", return_value=history), \
+         patch.object(hook, "_read", return_value=""), \
+         patch.object(hook, "_project_id", return_value="proj/main"):
+        hook._on_pre_tool_use(_pre_event("Implement /login"))
+
+    out = capsys.readouterr().out
+    assert "STAGNATION RISK" in out
+    assert "bcrypt" in out
+
+
+def test_no_warning_when_only_scratch_matches(hook, capsys):
+    """If the only matching checkpoint is scratch type, treat it as no history."""
+    history = [
+        {"current_task": "Implement /login", "stagnation_count": 5,
+         "checkpoint_type": "scratch", "blockers": [], "planner_blocker_class": "none",
+         "_planner_output": {}},
+    ]
+    with patch.object(hook, "_get", return_value=history), \
+         patch.object(hook, "_read", return_value=""), \
+         patch.object(hook, "_project_id", return_value="proj/main"):
+        hook._on_pre_tool_use(_pre_event("Implement /login"))
+
+    assert capsys.readouterr().out == ""
+
+
 # ── Main dispatcher ───────────────────────────────────────────────────────────
 
 def test_main_dispatches_pre_tool_use(hook, monkeypatch, capsys):
