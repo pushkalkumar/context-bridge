@@ -211,22 +211,21 @@ def _on_pre_tool_use(event: dict) -> None:
     blockers = matching.get("blockers") or []
     blocker_class = (matching.get("planner_blocker_class") or "none").strip()
 
+    w = 16
     lines = [
-        f"\n[context-bridge] ⚠ STAGNATION RISK — '{incoming_task[:70]}' "
-        f"has appeared {prev_stag}× in recent history.",
+        f"\n[context-bridge] ⚠ STAGNATION RISK  '{incoming_task[:70]}'  ({prev_stag}× in history)",
     ]
     if blockers:
-        lines.append(f"  Last recorded blocker: {blockers[0][:120]}")
+        lines.append(f"  {'Last blocker':<{w}}{blockers[0][:120]}")
     if blocker_class and blocker_class != "none":
         label = _BLOCKER_CLASS_LABELS.get(blocker_class, blocker_class)
-        lines.append(f"  Pattern type: {label}")
+        lines.append(f"  {'Pattern':<{w}}{label}")
     prev_instr = (planner.get("next_instruction") or "").strip()
     if prev_instr and not prev_instr.startswith("⚠"):
         first_line = prev_instr.split("\n")[0][:140]
-        lines.append(f"  Previous plan: {first_line}")
+        lines.append(f"  {'Previous plan':<{w}}{first_line}")
     lines.append(
-        "  Decompose into the smallest completable subtask before starting."
-        " Run `context-bridge why` for root-cause analysis.\n"
+        f"  {'Action':<{w}}decompose into the smallest completable subtask  →  context-bridge why\n"
     )
     print("\n".join(lines))
 
@@ -477,21 +476,22 @@ def _on_session_start(event: dict) -> None:
     if not (next_instr or ctx):
         return
 
+    w = 10
     lines = ["[context-bridge] Session context restored:"]
     if ctx:
-        lines.append(f"  Summary:  {ctx}")
+        lines.append(f"  {'Summary':<{w}}{ctx}")
     if next_instr:
-        lines.append(f"  Next:     {next_instr}")
+        lines.append(f"  {'Next':<{w}}{next_instr}")
     if priority:
-        lines.append(f"  Priority: {priority}")
+        lines.append(f"  {'Priority':<{w}}{priority}")
 
     # Patterns from pre-fetched result
     if patterns_raw:
         hot = patterns_raw.get("hotspot_files", [])[:3]
         if hot:
-            lines.append("  Hotspots: " + ", ".join(f"{h['path']} ({h['count']}x)" for h in hot))
+            lines.append("  Hotspots  " + ", ".join(f"{h['path']} ({h['count']}×)" for h in hot))
         for b in patterns_raw.get("recurring_blockers", [])[:2]:
-            lines.append(f"  Recurring blocker: {b['text']} ({b['count']}x)")
+            lines.append(f"  Blocker   {b['text']} ({b['count']}×)")
 
     # Semantic search: surface related past work (still sequential — conditional on next_instr)
     related = _related_work_lines(next_instr, pid)
@@ -500,7 +500,7 @@ def _on_session_start(event: dict) -> None:
 
     # Git state (already computed in parallel)
     if git_lines:
-        lines.append("\n[context-bridge] Current repo state:")
+        lines.append("\n[context-bridge] Repo state:")
         lines.extend(git_lines)
 
     print("\n".join(lines))
@@ -607,14 +607,17 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         _write(sid, "priority", priority)
 
     next_instr = (response.get("next_instruction") or "").strip()
+    w = 14
     if priority and priority != old_p:
-        print(f"[context-bridge] Checkpoint saved. Priority: {priority}")
+        print(f"[context-bridge] Checkpoint saved")
+        print(f"  {'Priority':<{w}}{priority}")
     elif next_instr:
         display = next_instr.lstrip("⚠").strip()
         first_line = display.split("\n")[0][:120]
-        print(f"[context-bridge] Checkpoint saved. Next: {first_line}")
+        print(f"[context-bridge] Checkpoint saved")
+        print(f"  {'Next':<{w}}{first_line}")
     else:
-        print("[context-bridge] Checkpoint saved.")
+        print("[context-bridge] Checkpoint saved")
 
     # Surface planner intelligence when noteworthy
     confidence = response.get("confidence")
@@ -622,17 +625,14 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
     decomposition = response.get("decomposition_suggested", False)
     alternatives = response.get("alternatives") or []
 
-    meta_parts = []
     if confidence is not None and confidence < 0.75:
-        meta_parts.append(f"confidence {confidence:.0%}")
+        print(f"  {'Confidence':<{w}}{confidence:.0%}  (low — verify approach before proceeding)")
     if blocker_class and blocker_class != "none":
-        meta_parts.append(f"blocker: {blocker_class}")
+        print(f"  {'Blocker class':<{w}}{blocker_class}")
     if decomposition:
-        meta_parts.append("decompose")
-    if meta_parts:
-        print(f"[context-bridge]   {' · '.join(meta_parts)}")
+        print(f"  {'Decompose':<{w}}yes — break into subtasks ≤ 30 min")
     if alternatives:
-        print(f"[context-bridge]   Alt: {alternatives[0][:100]}")
+        print(f"  {'Alt':<{w}}{alternatives[0][:100]}")
 
     report = response.get("stagnation_report")
     if report:
@@ -640,10 +640,10 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         count = report.get("checkpoint_count", 0)
         blocker = report.get("primary_blocker") or "none recorded"
         rec = report.get("recommendation", "")
-        print(f"\n[context-bridge] ⚠ STAGNATION ({count} sessions, {hours}h stuck)")
-        print(f"  Blocker: {blocker}")
+        print(f"\n[context-bridge] ⚠ STAGNATION  ({count} sessions · {hours}h)")
+        print(f"  {'Blocker':<{w}}{blocker}")
         if rec:
-            print(f"  Action:  {rec[:160]}")
+            print(f"  {'Action':<{w}}{rec[:160]}")
         print()
 
     # Blocker history match: surface if this error has been seen before  (v0.7.0)
@@ -654,11 +654,11 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         resolved = blocker_match.get("resolved", False)
         if resolved:
             print(f"[context-bridge] ⚠ Recurring error: '{mb}'")
-            print(f"  Previously resolved → fix was: {fix}")
-            print(f"  If it's back: verify the fix was committed/persisted.")
+            print(f"  {'Previously':<{w}}resolved — fix was: {fix}")
+            print(f"  {'Check':<{w}}verify the fix was committed/persisted")
         else:
             print(f"[context-bridge] ⚠ Persistent error: '{mb}'")
-            print(f"  Seen before, never resolved. Previous plan: {fix}")
+            print(f"  {'Seen before':<{w}}never resolved — previous plan: {fix}")
 
 
 # ── Stop ─────────────────────────────────────────────────────────────────────

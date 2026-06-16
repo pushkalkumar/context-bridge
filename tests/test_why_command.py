@@ -34,7 +34,7 @@ def test_why_no_stagnation(monkeypatch, capsys):
     }))
     _do_why()
     out = capsys.readouterr().out
-    assert "No stagnation" in out
+    assert "none" in out
     assert "on track" in out
 
 
@@ -72,7 +72,7 @@ def test_why_full_stagnation(monkeypatch, capsys):
     }))
     _do_why()
     out = capsys.readouterr().out
-    assert "STAGNATION DETECTED" in out
+    assert "STAGNATING" in out
     assert "bcrypt import error" in out
     assert "Break this into smaller tasks" in out
     assert "slower than baseline" in out

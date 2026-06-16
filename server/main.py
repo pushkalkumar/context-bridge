@@ -253,7 +253,7 @@ async def delete(project_id: str) -> dict:
 async def history(project_id: str, limit: int = 50) -> list[dict]:
     if not project_exists(project_id):
         raise _not_found(project_id)
-    return get_recent_checkpoints(project_id, n=min(limit, 100))
+    return get_recent_checkpoints(project_id, n=min(max(limit, 0), 100))
 
 
 @app.get("/projects/{project_id:path}/stagnation-report", response_model=StagnationReport)
@@ -435,11 +435,13 @@ def _do_install() -> None:
     _configure_hooks()
 
     hook_dest = str(_HOOK_DEST).replace(str(Path.home()), "~")
-    print(f"✓ SessionStart hook  → {hook_dest}")
-    print(f"✓ PreToolUse hook    → {hook_dest}  (cross-session stagnation warning)")
-    print(f"✓ PostToolUse hook   → {hook_dest}")
-    print(f"✓ Stop hook          → {hook_dest}")
-    print(f"✓ Skill imported     → CLAUDE.md ← {_SKILL_DEST.name}")
+    w = 20
+    print(f"Context Bridge installed\n")
+    print(f"  {f'SessionStart hook':<{w}}→  {hook_dest}")
+    print(f"  {f'PreToolUse hook':<{w}}→  {hook_dest}")
+    print(f"  {f'PostToolUse hook':<{w}}→  {hook_dest}")
+    print(f"  {f'Stop hook':<{w}}→  {hook_dest}")
+    print(f"  {f'Skill':<{w}}→  CLAUDE.md ← {_SKILL_DEST.name}")
 
 
 def _configure_hooks() -> None:
@@ -494,18 +496,26 @@ def _unconfigure_hooks() -> bool:
 
 
 def _do_uninstall() -> None:
+    removed: list[str] = []
     if _unconfigure_hooks():
-        print(f"✗ Hooks removed      → {_SETTINGS_PATH}")
-    for path, label in ((_HOOK_DEST, "Hook script removed"), (_SKILL_DEST, "Skill removed")):
+        removed.append(f"hooks from {_SETTINGS_PATH}")
+    for path, label in ((_HOOK_DEST, "hook script"), (_SKILL_DEST, "skill")):
         if path.exists():
             path.unlink()
-            print(f"✗ {label:<18} → {path}")
+            removed.append(str(path))
     if _CLAUDE_MD.exists():
         content = _CLAUDE_MD.read_text()
         if _IMPORT_LINE in content:
             _CLAUDE_MD.write_text(content.replace(f"\n\n{_IMPORT_LINE}\n", "\n").replace(f"{_IMPORT_LINE}\n", ""))
-            print(f"✗ Import removed     → {_CLAUDE_MD}")
-    print("Done. The checkpoint database at ~/.context-bridge/ was not touched.")
+            removed.append(f"import line from {_CLAUDE_MD}")
+
+    if removed:
+        print("Context Bridge uninstalled\n")
+        for item in removed:
+            print(f"  ✗  {item}")
+    else:
+        print("Nothing to uninstall.")
+    print("\n  Database at ~/.context-bridge/ was not touched.")
 
 
 def _fmt_age(ts: str | int | None) -> str:
@@ -517,7 +527,11 @@ def _fmt_age(ts: str | int | None) -> str:
             dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
         else:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        s = (datetime.now(timezone.utc) - dt).total_seconds()
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+        s = max((datetime.now(timezone.utc) - dt).total_seconds(), 0)
+        if s < 60:
+            return "just now"
         if s < 3600:
             return f"{int(s // 60)}m ago"
         if s < 86400:
@@ -546,43 +560,48 @@ def _fetch(path: str, timeout: float = 2.0):
         return None
 
 
+def _row(label: str, value: str, width: int = 11) -> str:
+    return f"  {label:<{width}}{value}"
+
+
 def _do_status() -> None:
     data = _fetch("/health")
     if not data:
-        print(f"Backend    not running  (start with: context-bridge)")
+        print(f"Context Bridge  ✗ not running")
+        print(f"  Start with: context-bridge")
         return
-    print(f"Backend    running on port {data['port']}")
-    print(f"DB         {settings.db_path}")
+
+    print(f"Context Bridge  ✓ running on port {data['port']}\n")
+    print(_row("Database", str(settings.db_path)))
 
     s = _fetch("/stats")
     projects_data = _fetch("/projects") or []
     if s:
-        print(f"Projects   {s['total_projects']}")
-        print(f"Checkpoints {s['total_checkpoints']}")
+        tp, tc = s["total_projects"], s["total_checkpoints"]
+        print(_row("Projects", f"{tp}  ·  Checkpoints  {tc}"))
 
-    # Show current stagnation health (not a historical count)
     stagnant = [p for p in projects_data if p.get("stagnation_count", 0) >= 3]
     if stagnant:
         names = ", ".join(p["project_id"] for p in stagnant[:3])
-        suffix = f" → run `context-bridge why`  ({names})"
-        print(f"Stagnant   {len(stagnant)} project{'s' if len(stagnant) != 1 else ''}{suffix}")
+        n = len(stagnant)
+        print(_row("Stagnant", f"{n} project{'s' if n != 1 else ''}  →  context-bridge why  ({names})"))
     else:
-        print(f"Stagnant   none")
+        print(_row("Stagnant", "none"))
 
     planner = "rule-based (no LLM configured)"
     if settings.anthropic_api_key:
-        planner = "Anthropic (claude-sonnet-4-6)"
+        planner = "Anthropic claude-sonnet-4-6"
     elif settings.resolved_ollama_host():
         planner = f"Ollama ({settings.ollama_model})"
-    print(f"Planner    {planner}")
-    print(f"Velocity   tracking enabled")
+    print(_row("Planner", planner))
+    print(_row("Velocity", "enabled"))
     embed_status = (
         "enabled (voyageai)" if (settings.embedding_api_key() and _SQLITE_VEC_AVAILABLE)
-        else "disabled (set VOYAGE_API_KEY or ANTHROPIC_API_KEY and pip install voyageai)"
+        else "disabled  →  add VOYAGE_API_KEY and pip install voyageai"
         if _SQLITE_VEC_AVAILABLE
-        else "disabled (sqlite-vec not installed)"
+        else "disabled  →  pip install sqlite-vec"
     )
-    print(f"Embeddings {embed_status}")
+    print(_row("Embeddings", embed_status))
 
 
 def _do_list() -> None:
@@ -604,12 +623,11 @@ def _do_list() -> None:
         task_c = bd.get("task", 0)
         scratch_c = bd.get("scratch", 0)
         session_c = bd.get("session", 0)
-        type_str = f" ({task_c} task, {scratch_c} scratch, {session_c} session)" if (task_c + scratch_c + session_c > 0) else ""
-        count_str = f"{n} checkpoint{'s' if n != 1 else ''}{type_str}"
+        counts = f"{n} checkpoint{'s' if n != 1 else ''}  task:{task_c}  scratch:{scratch_c}  session:{session_c}"
         stag = p.get("stagnation_count", 0)
-        stag_str = f"  ⚠ stagnant ({stag}x)" if stag >= 3 else ""
+        stag_str = f"  ⚠ stagnant {stag}×" if stag >= 3 else ""
         age = _fmt_age(p.get("last_active", ""))
-        print(f"  {pid}{count_str:<45}{age}{stag_str}")
+        print(f"  {pid}{counts:<52}{age}{stag_str}")
 
 
 def _do_diff(project_id: str) -> None:
@@ -620,7 +638,7 @@ def _do_diff(project_id: str) -> None:
 
     result = _fetch(f"/diff/{project_id}")
     if result is None:
-        print(f"Not enough task checkpoints to diff. Run more sessions first.")
+        print("Not enough task checkpoints to diff. Run more sessions first.")
         return
     if "detail" in result:
         detail = result["detail"]
@@ -635,36 +653,39 @@ def _do_diff(project_id: str) -> None:
     to_age = _fmt_age(to_cp.get("completed_at_ts"))
     from_dur = from_cp.get("task_duration_ms")
     to_dur = to_cp.get("task_duration_ms")
-    vel_str = ""
-    if from_dur is not None and to_dur is not None:
-        vel_str = "faster" if to_dur < from_dur else "slower"
 
     from_conf = from_cp.get("planner_confidence")
     to_conf = to_cp.get("planner_confidence")
     if from_conf is not None and to_conf is not None:
         conf_dir = "↑" if to_conf > from_conf else "↓" if to_conf < from_conf else "→"
-        conf_str = f"{from_conf:.2f} → {to_conf:.2f}  ({conf_dir})"
+        conf_str = f"{from_conf:.2f} → {to_conf:.2f}  {conf_dir}"
     else:
         conf_str = "N/A"
 
-    print(f"\n  FROM ({from_age}):  {from_cp.get('task_summary', '')}")
-    print(f"  TO   ({to_age}):   {to_cp.get('task_summary', '')}")
+    w = 22
+    print(f"\n  {project_id}\n")
+    print(f"  {'FROM':<{w}}{from_cp.get('task_summary', '')}  ({from_age})")
+    print(f"  {'TO':<{w}}{to_cp.get('task_summary', '')}  ({to_age})")
     print()
-    print(f"  Planner confidence:    {conf_str}")
+    print(f"  {'Confidence':<{w}}{conf_str}")
     if from_dur is not None and to_dur is not None:
-        print(f"  Velocity:              {_fmt_ms(from_dur)} → {_fmt_ms(to_dur)}  ({vel_str})")
-    print(f"  Blocker class:         {from_cp.get('planner_blocker_class', 'none')} → {to_cp.get('planner_blocker_class', 'none')}")
-    decomp_from = "true" if from_cp.get("planner_decomposition_suggested") else "false"
-    decomp_to = "true" if to_cp.get("planner_decomposition_suggested") else "false"
-    print(f"  Decomposition needed:  {decomp_from} → {decomp_to}")
+        vel_dir = "↑ faster" if to_dur < from_dur else "↓ slower" if to_dur > from_dur else "→ same"
+        print(f"  {'Velocity':<{w}}{_fmt_ms(from_dur)} → {_fmt_ms(to_dur)}  {vel_dir}")
+    bc_from = from_cp.get("planner_blocker_class") or "none"
+    bc_to = to_cp.get("planner_blocker_class") or "none"
+    print(f"  {'Blocker class':<{w}}{bc_from} → {bc_to}")
+    decomp_from = "yes" if from_cp.get("planner_decomposition_suggested") else "no"
+    decomp_to = "yes" if to_cp.get("planner_decomposition_suggested") else "no"
+    print(f"  {'Decompose':<{w}}{decomp_from} → {decomp_to}")
     next_instr = result.get("next_instruction", "")
     if next_instr:
-        print(f"\n  Next instruction:")
+        print(f"\n  Next:")
         for line in next_instr.splitlines():
-            print(f"    {line}")
+            if line.strip():
+                print(f"    {line}")
     priority = result.get("priority_focus", [])
     if priority:
-        print(f"    Priority focus: {', '.join(priority[:5])}")
+        print(f"  Priority: {', '.join(priority[:5])}")
     print()
 
 
@@ -714,29 +735,28 @@ def _do_replay() -> None:
 
     replay = _fetch(f"/projects/{pid}/replay")
     if not replay or not replay.get("attempts"):
-        print(f"No attempt history found for {pid}.")
-        print("(Attempt replay requires stagnation — the same task appearing in 2+ sessions.)")
+        print(f"No attempt history for {pid}.")
+        print("Attempt replay requires the same task appearing in 2+ sessions.")
         return
 
     task = replay.get("task", "")
     count = replay.get("attempt_count", 0)
-    print(f"\n  Project: {pid}")
-    print(f"  Task:    '{task}'")
-    print(f"  Attempts: {count}\n")
+    print(f"\n  {pid}")
+    print(f"  Task: '{task}'  ·  {count} attempt{'s' if count != 1 else ''}\n")
 
     for a in replay["attempts"]:
         ts = a.get("timestamp", "")[:16]
         files = ", ".join(a.get("files_modified", [])[:3]) or "none"
         blockers = a.get("blockers", [])
-        dur = f"  ({a['duration_min']}m)" if a.get("duration_min") else ""
+        dur = f"  {a['duration_min']}m" if a.get("duration_min") else ""
         bc = a.get("blocker_class") or ""
         bc_str = f"  [{bc}]" if bc and bc != "none" else ""
         plan = a.get("next_instruction", "")
 
-        print(f"  Attempt {a['attempt']}  {ts}{dur}")
+        print(f"  Attempt {a['attempt']}  {ts}{dur}{bc_str}")
         print(f"    Files:   {files}")
         if blockers:
-            print(f"    Blocker: {blockers[0][:100]}{bc_str}")
+            print(f"    Blocker: {blockers[0][:100]}")
         if plan:
             print(f"    Plan:    {plan[:100]}")
         print()
@@ -750,8 +770,9 @@ def _do_why() -> None:
         print("Backend not running. Start it with: context-bridge")
         return
 
-    print(f"\n  Project: {pid}\n")
+    print(f"\n  {pid}\n")
 
+    w = 14
     history = _fetch(f"/history/{pid}?limit=1") or []
     current_stag = history[0].get("stagnation_count", 1) if history else 0
 
@@ -762,24 +783,24 @@ def _do_why() -> None:
             count = stag.get("checkpoint_count", 0)
             blocker = stag.get("primary_blocker") or "none recorded"
             rec = stag.get("recommendation", "")
-            current_task = (history[0].get("current_task", "") if history else "")[:60]
-            print("  ⚠ STAGNATION DETECTED")
+            current_task = (history[0].get("current_task", "") if history else "")[:70]
+            print(f"  ⚠ STAGNATING\n")
             if current_task:
-                print(f"  Task:    '{current_task}'")
-            print(f"  Stuck:   {count} sessions, {hours}h")
-            print(f"  Blocker: {blocker}")
+                print(_row("Task", repr(current_task), w))
+            print(_row("Stuck", f"{count} sessions · {hours}h", w))
+            print(_row("Blocker", blocker, w))
             if rec:
-                print(f"  Action:  {rec[:160]}")
+                print(_row("Action", rec[:160], w))
         else:
-            print("  Stagnation data unavailable.")
+            print("  ⚠ Stagnation data unavailable.")
     elif current_stag == 2:
-        task = (history[0].get("current_task", "") if history else "")[:60]
-        print("  ⚠ APPROACHING STAGNATION (2 sessions)")
+        task = (history[0].get("current_task", "") if history else "")[:70]
+        print(f"  ⚠ APPROACHING STAGNATION  (2 sessions on same task)\n")
         if task:
-            print(f"  Task: '{task}'")
-        print("  One more attempt without completing this task triggers forced decomposition.")
+            print(_row("Task", repr(task), w))
+        print(_row("Next", "one more repeat triggers forced decomposition", w))
     else:
-        print("  No stagnation — current task is progressing normally.")
+        print(_row("Stagnation", "none — progressing normally", w))
 
     print()
 
@@ -791,37 +812,35 @@ def _do_why() -> None:
         cur_m, cur_s2 = divmod(int(cur_s), 60)
         ratio = vel.get("velocity_ratio")
         alert = vel.get("alert", False)
-        ratio_str = f"  |  {ratio:.1f}×" if ratio is not None else ""
+        ratio_str = f"  {ratio:.1f}×" if ratio is not None else ""
         status = "  ⚠ slower than baseline" if alert else "  on track"
-        print(f"  Velocity: {cur_m}m {cur_s2}s current  |  {avg_m}m {avg_s2}s baseline{ratio_str}{status}")
+        print(_row("Velocity", f"{cur_m}m {cur_s2}s current  ·  {avg_m}m {avg_s2}s baseline{ratio_str}{status}", w))
     else:
-        print("  Velocity: insufficient history (5+ completed tasks needed for baseline)")
-
-    print()
+        print(_row("Velocity", "insufficient history (5+ task checkpoints needed)", w))
 
     # Goal drift
     drift = _fetch(f"/projects/{pid}/goal-drift")
     if drift and drift.get("drifted"):
         goals = drift.get("goals", [])
-        print(f"  ⚠ GOAL DRIFT ({drift['distinct_count']} distinct goals in recent sessions):")
+        print(f"\n  ⚠ GOAL DRIFT  ({drift['distinct_count']} distinct goals in recent sessions)")
         for g in goals[-4:]:
             print(f"    → '{g}'")
-        print("  Confirm the current goal is still what you intend to ship.")
-        print()
+        print("  Confirm the current goal before continuing.")
 
-    # Attempt replay summary (when stagnation exists)
+    # Attempt replay summary
     if current_stag >= 2:
         replay = _fetch(f"/projects/{pid}/replay")
         if replay and replay.get("attempts") and len(replay["attempts"]) >= 2:
-            print(f"  Attempt history ({len(replay['attempts'])} sessions on this task):")
+            print(f"\n  Attempt history ({len(replay['attempts'])} sessions):")
             for a in replay["attempts"]:
                 ts = a.get("timestamp", "")[:10]
                 blockers = a.get("blockers", [])
                 b_str = f"  → {blockers[0][:70]}" if blockers else ""
                 dur = f" ({a['duration_min']}m)" if a.get("duration_min") else ""
                 print(f"    Attempt {a['attempt']} ({ts}){dur}{b_str}")
-            print(f"  Full history: context-bridge replay")
-            print()
+            print("  Full details: context-bridge replay")
+
+    print()
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
@@ -871,8 +890,9 @@ def run() -> None:
         _do_export(args.project or _current_pid(), args.output)
     else:
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
-        print(f"Context Bridge  http://127.0.0.1:{settings.server_port}")
-        print(f"Dashboard       http://127.0.0.1:{settings.server_port}/")
-        print(f"DB              {settings.db_path}")
-        print("Ctrl+C to stop.\n")
+        w = 12
+        print(f"Context Bridge  →  http://127.0.0.1:{settings.server_port}")
+        print(_row("Dashboard", f"http://127.0.0.1:{settings.server_port}/", w))
+        print(_row("Database", str(settings.db_path), w))
+        print("Ctrl+C to stop\n")
         uvicorn.run("server.main:app", host="127.0.0.1", port=settings.server_port, log_level="warning")

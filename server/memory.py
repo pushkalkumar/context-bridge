@@ -177,9 +177,9 @@ def search_checkpoints(
             placeholders = ",".join("?" * len(checkpoint_ids))
             checkpoints = con.execute(
                 f"""
-                SELECT id, project_id, checkpoint_type, completed_at_ts, planner_confidence, data
+                SELECT rowid, project_id, checkpoint_type, completed_at_ts, planner_confidence, data
                 FROM checkpoints
-                WHERE id IN ({placeholders})
+                WHERE rowid IN ({placeholders})
                 AND checkpoint_type IN ('task', 'session')
                 """,
                 checkpoint_ids,
@@ -272,7 +272,7 @@ def _get_prev_completed_at_ts(project_id: str) -> int | None:
     """Return completed_at_ts of the most recent checkpoint for this project."""
     with _conn() as con:
         row = con.execute(
-            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND completed_at_ts IS NOT NULL ORDER BY id DESC LIMIT 1",
+            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND completed_at_ts IS NOT NULL ORDER BY rowid DESC LIMIT 1",
             (project_id,),
         ).fetchone()
     return row[0] if row else None
@@ -291,12 +291,12 @@ def get_velocity(project_id: str) -> dict | None:
     with _conn() as con:
         # Latest task checkpoint for current_duration_ms calculation
         latest = con.execute(
-            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY id DESC LIMIT 1",
+            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY rowid DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         # Last 10 task checkpoints with non-null task_duration_ms for baseline
         baseline_rows = con.execute(
-            "SELECT task_duration_ms FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' AND task_duration_ms IS NOT NULL ORDER BY id DESC LIMIT 10",
+            "SELECT task_duration_ms FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' AND task_duration_ms IS NOT NULL ORDER BY rowid DESC LIMIT 10",
             (project_id,),
         ).fetchall()
 
@@ -336,10 +336,10 @@ def purge_old_scratch_checkpoints() -> int:
 # ── Core CRUD ─────────────────────────────────────────────────────────────────
 
 def compute_stagnation_count(project_id: str, new_task: str) -> int:
-    """Stagnation streak for new_task (excludes scratch checkpoints)."""
+    """Stagnation streak for new_task (excludes scratch and session checkpoints)."""
     with _conn() as con:
         rows = con.execute(
-            "SELECT data, stagnation_count FROM checkpoints WHERE project_id = ? AND checkpoint_type != 'scratch' ORDER BY timestamp DESC, id DESC LIMIT 1",
+            "SELECT data, stagnation_count FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY timestamp DESC, rowid DESC LIMIT 1",
             (project_id,),
         ).fetchall()
     if not rows:
@@ -359,7 +359,7 @@ def compute_stagnation_from_history(new_task: str, history: list[dict]) -> int:
     """
     norm = _normalize(new_task)
     for cp in history:
-        if cp.get("checkpoint_type") == "scratch":
+        if cp.get("checkpoint_type") in ("scratch", "session"):
             continue
         if _normalize(cp.get("current_task", "")) == norm:
             return cp.get("stagnation_count", 1) + 1
@@ -403,7 +403,7 @@ def delete_project(project_id: str) -> int:
 def get_recent_checkpoints(project_id: str, n: int = 10) -> list[dict]:
     with _conn() as con:
         rows = con.execute(
-            "SELECT data FROM checkpoints WHERE project_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
+            "SELECT data FROM checkpoints WHERE project_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?",
             (project_id, n),
         ).fetchall()
     return [json.loads(r[0]) for r in rows]
@@ -414,15 +414,21 @@ def get_all_projects() -> list[dict]:
         rows = con.execute(
             """
             SELECT
-                project_id,
+                c.project_id,
                 COUNT(*) as checkpoint_count,
-                MAX(timestamp) as last_active,
-                MAX(stagnation_count) as max_stagnation,
-                SUM(CASE WHEN checkpoint_type = 'task'    THEN 1 ELSE 0 END) as task_count,
-                SUM(CASE WHEN checkpoint_type = 'scratch' THEN 1 ELSE 0 END) as scratch_count,
-                SUM(CASE WHEN checkpoint_type = 'session' THEN 1 ELSE 0 END) as session_count
-            FROM checkpoints
-            GROUP BY project_id
+                MAX(c.timestamp) as last_active,
+                SUM(CASE WHEN c.checkpoint_type = 'task'    THEN 1 ELSE 0 END) as task_count,
+                SUM(CASE WHEN c.checkpoint_type = 'scratch' THEN 1 ELSE 0 END) as scratch_count,
+                SUM(CASE WHEN c.checkpoint_type = 'session' THEN 1 ELSE 0 END) as session_count,
+                (
+                    SELECT stagnation_count
+                    FROM checkpoints
+                    WHERE project_id = c.project_id AND checkpoint_type = 'task'
+                    ORDER BY timestamp DESC, rowid DESC
+                    LIMIT 1
+                ) as current_stagnation
+            FROM checkpoints c
+            GROUP BY c.project_id
             ORDER BY last_active DESC
             """
         ).fetchall()
@@ -431,8 +437,8 @@ def get_all_projects() -> list[dict]:
             "project_id": r[0],
             "checkpoint_count": r[1],
             "last_active": r[2],
-            "stagnation_count": r[3],
-            "type_breakdown": {"task": r[4] or 0, "scratch": r[5] or 0, "session": r[6] or 0},
+            "stagnation_count": r[6] or 1,
+            "type_breakdown": {"task": r[3] or 0, "scratch": r[4] or 0, "session": r[5] or 0},
         }
         for r in rows
     ]
@@ -465,7 +471,7 @@ def get_diff_data(project_id: str) -> dict | None:
                       planner_decomposition_suggested, completed_at_ts
                FROM checkpoints
                WHERE project_id = ? AND checkpoint_type = 'task'
-               ORDER BY id DESC
+               ORDER BY rowid DESC
                LIMIT 2""",
             (project_id,),
         ).fetchall()
