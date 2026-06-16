@@ -1,12 +1,25 @@
+from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+@lru_cache(maxsize=1)
+def _probe_ollama() -> str | None:
+    """One-shot probe of localhost:11434. Result is cached for the process lifetime."""
+    try:
+        import httpx
+        r = httpx.get("http://localhost:11434/api/tags", timeout=1.0)
+        if r.status_code == 200:
+            return "http://localhost:11434"
+    except Exception:
+        pass
+    return None
+
+
 class Settings(BaseSettings):
     anthropic_api_key: str | None = None
-    voyage_api_key: str | None = None          # Voyage AI key for embeddings; falls back to anthropic_api_key
-    # Set OLLAMA_HOST to use Ollama. Leave unset to auto-detect localhost:11434.
+    voyage_api_key: str | None = None
     ollama_host: str | None = None
     ollama_model: str = "qwen2.5-coder:7b"
     db_path: Path = Path.home() / ".context-bridge" / "checkpoints.db"
@@ -19,20 +32,11 @@ class Settings(BaseSettings):
     )
 
     def resolved_ollama_host(self) -> str | None:
-        """Return OLLAMA_HOST if set, or probe localhost:11434 as a fallback."""
-        if self.ollama_host:
-            return self.ollama_host
-        try:
-            import httpx
-            r = httpx.get("http://localhost:11434/api/tags", timeout=1.0)
-            if r.status_code == 200:
-                return "http://localhost:11434"
-        except Exception:
-            pass
-        return None
+        """OLLAMA_HOST if explicitly set; else probe localhost:11434 once per process."""
+        return self.ollama_host or _probe_ollama()
 
     def embedding_api_key(self) -> str | None:
-        """Voyage AI key for embeddings: VOYAGE_API_KEY > ANTHROPIC_API_KEY."""
+        """VOYAGE_API_KEY > ANTHROPIC_API_KEY for embedding calls."""
         return self.voyage_api_key or self.anthropic_api_key
 
 

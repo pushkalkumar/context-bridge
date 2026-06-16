@@ -351,6 +351,22 @@ def compute_stagnation_count(project_id: str, new_task: str) -> int:
     return 1
 
 
+def compute_stagnation_from_history(new_task: str, history: list[dict]) -> int:
+    """Same logic as compute_stagnation_count but from already-fetched history.
+
+    Avoids a second DB round-trip in /sync where history is already in hand.
+    history must be ordered newest-first (as returned by get_recent_checkpoints).
+    """
+    norm = _normalize(new_task)
+    for cp in history:
+        if cp.get("checkpoint_type") == "scratch":
+            continue
+        if _normalize(cp.get("current_task", "")) == norm:
+            return cp.get("stagnation_count", 1) + 1
+        return 1
+    return 1
+
+
 def save_checkpoint(data: dict) -> int:
     """Insert a checkpoint row. Returns the rowid of the inserted row."""
     with _conn() as con:
@@ -617,7 +633,8 @@ def build_stagnation_report(project_id: str, stuck_task: str | None = None, n: i
 
 
 def extract_patterns(project_id: str) -> dict:
-    checkpoints = get_recent_checkpoints(project_id, n=10_000)
+    # Cap at 500 recent checkpoints — pattern detection needs recency, not full history
+    checkpoints = get_recent_checkpoints(project_id, n=500)
 
     file_counts: Counter = Counter()
     blocker_counts: Counter = Counter()
@@ -670,9 +687,11 @@ _EXT_TO_STACK: dict[str, str] = {
 
 
 def build_profile() -> dict:
-    """Cross-project developer profile aggregated from all stored checkpoints."""
+    """Cross-project developer profile aggregated from stored checkpoints."""
     with _conn() as con:
-        rows = con.execute("SELECT data FROM checkpoints").fetchall()
+        rows = con.execute(
+            "SELECT data FROM checkpoints ORDER BY id DESC LIMIT 1000"
+        ).fetchall()
         # New computed fields from DB columns
         velocity_rows = con.execute(
             "SELECT task_duration_ms FROM checkpoints WHERE checkpoint_type = 'task' AND task_duration_ms IS NOT NULL"
@@ -897,7 +916,7 @@ _SKIP_GOALS = frozenset({
 })
 
 
-def detect_goal_drift(project_id: str, n: int = 10) -> dict:
+def detect_goal_drift(project_id: str, n: int = 20) -> dict:
     """Detect when user_goal changes frequently across recent checkpoints.
 
     Returns {drifted: bool, goals: list[str], distinct_count: int}

@@ -2,14 +2,16 @@ import argparse
 import asyncio
 import json
 import logging
+import os
 import shutil
+import tempfile
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from .config import settings
@@ -21,6 +23,7 @@ from .memory import (
     build_stagnation_report,
     classify_checkpoint_type,
     compute_stagnation_count,
+    compute_stagnation_from_history,
     compute_task_duration_ms,
     delete_project,
     detect_goal_drift,
@@ -53,6 +56,7 @@ from .models import (
     ProjectSummary,
     SearchRequest,
     SearchResponse,
+    SearchResult,
     StagnationReport,
     SyncResponse,
     VelocityReport,
@@ -165,13 +169,16 @@ async def checkpoint(cp: CheckpointIn) -> CheckpointAck:
 
 
 @app.post("/sync", response_model=SyncResponse)
-async def sync(cp: CheckpointIn) -> SyncResponse:
+async def sync(cp: CheckpointIn, background_tasks: BackgroundTasks) -> SyncResponse:
     """Store a checkpoint and return an authoritative plan."""
     data = _prepare_checkpoint_data(cp)
-    stag = compute_stagnation_count(data["project_id"], data["current_task"])
+
+    # Fetch history once — shared between stagnation computation and planner.
+    # This eliminates the separate compute_stagnation_count DB read.
+    history = get_recent_checkpoints(data["project_id"], n=10)
+    stag = compute_stagnation_from_history(data["current_task"], history)
     data["stagnation_count"] = stag
 
-    history = get_recent_checkpoints(data["project_id"], n=10)
     report = build_stagnation_report(data["project_id"], data["current_task"]) if stag >= 3 else None
     attempt_replay_data = build_attempt_replay(data["project_id"], data["current_task"]) if stag >= 2 else None
     result = run_planner(data, history, stag, report, attempt_replay_data)
@@ -182,10 +189,8 @@ async def sync(cp: CheckpointIn) -> SyncResponse:
         avg_s = (velocity["avg_duration_ms"] or 0) / 1000
         cur_s = (velocity["current_duration_ms"] or 0) / 1000
         ratio = velocity["velocity_ratio"] or 0
-        avg_min = int(avg_s // 60)
-        avg_sec = int(avg_s % 60)
-        cur_min = int(cur_s // 60)
-        cur_sec = int(cur_s % 60)
+        avg_min, avg_sec = divmod(int(avg_s), 60)
+        cur_min, cur_sec = divmod(int(cur_s), 60)
         warning = (
             f"⚠ VELOCITY ALERT: This task is taking {ratio:.1f}x longer than your baseline on this branch.\n"
             f"  Last 10 tasks averaged {avg_min}m {avg_sec}s. Current task has been open {cur_min}m {cur_sec}s.\n"
@@ -206,7 +211,11 @@ async def sync(cp: CheckpointIn) -> SyncResponse:
     data["planner_decomposition_suggested"] = result.decomposition_suggested
 
     checkpoint_id = save_checkpoint(data)
-    save_embedding(checkpoint_id, _embed_text_for(data))
+
+    # Fire embedding in background — don't block the sync response on a network call.
+    # BackgroundTasks are awaited by FastAPI after response delivery, unlike
+    # asyncio.create_task which can be garbage-collected before completion.
+    background_tasks.add_task(save_embedding, checkpoint_id, _embed_text_for(data))
 
     logger.info(
         "sync  project=%s  task=%r  source=%s  stagnation=%d  type=%s  confidence=%.2f",
@@ -252,6 +261,14 @@ async def stagnation_report(project_id: str) -> StagnationReport:
     if not project_exists(project_id):
         raise _not_found(project_id)
     report = build_stagnation_report(project_id)
+    if report is None:
+        raise HTTPException(
+            status_code=404,
+            detail=ErrorResponse(
+                error="no_stagnation",
+                message=f"No stagnant task found for project '{project_id}'.",
+            ).model_dump(),
+        )
     return StagnationReport(**report)
 
 
@@ -305,7 +322,6 @@ async def velocity(project_id: str) -> VelocityReport:
 async def search(req: SearchRequest) -> SearchResponse:
     """Semantic KNN search over task/session checkpoints across projects."""
     results = search_checkpoints(req.query, req.limit, req.exclude_project_id)
-    from .models import SearchResult
     return SearchResponse(results=[SearchResult(**r) for r in results])
 
 
@@ -377,6 +393,26 @@ async def blocker_history(project_id: str, q: str = "") -> BlockerMatch | None:
 _HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "Stop")
 
 
+def _atomic_write_json(path: Path, data: dict) -> None:
+    """Write JSON atomically: write to a sibling temp file then os.replace."""
+    content = (json.dumps(data, indent=2) + "\n").encode()
+    fd, tmp = tempfile.mkstemp(dir=path.parent, suffix=".tmp")
+    try:
+        os.write(fd, content)
+        os.close(fd)
+        os.replace(tmp, path)
+    except Exception:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _do_install() -> None:
     _CLAUDE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -428,7 +464,7 @@ def _configure_hooks() -> None:
             changed = True
 
     if changed:
-        _SETTINGS_PATH.write_text(json.dumps(settings_data, indent=2) + "\n")
+        _atomic_write_json(_SETTINGS_PATH, settings_data)
 
 
 def _unconfigure_hooks() -> bool:
@@ -453,7 +489,7 @@ def _unconfigure_hooks() -> bool:
                 hooks.pop(event, None)
 
     if changed:
-        _SETTINGS_PATH.write_text(json.dumps(settings_data, indent=2) + "\n")
+        _atomic_write_json(_SETTINGS_PATH, settings_data)
     return changed
 
 
@@ -470,6 +506,33 @@ def _do_uninstall() -> None:
             _CLAUDE_MD.write_text(content.replace(f"\n\n{_IMPORT_LINE}\n", "\n").replace(f"{_IMPORT_LINE}\n", ""))
             print(f"✗ Import removed     → {_CLAUDE_MD}")
     print("Done. The checkpoint database at ~/.context-bridge/ was not touched.")
+
+
+def _fmt_age(ts: str | int | None) -> str:
+    """Human-readable age from an ISO timestamp string or unix-millisecond int."""
+    if not ts:
+        return "unknown"
+    try:
+        if isinstance(ts, int):
+            dt = datetime.fromtimestamp(ts / 1000, tz=timezone.utc)
+        else:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        s = (datetime.now(timezone.utc) - dt).total_seconds()
+        if s < 3600:
+            return f"{int(s // 60)}m ago"
+        if s < 86400:
+            return f"{int(s // 3600)}h ago"
+        return f"{int(s // 86400)}d ago"
+    except Exception:
+        return str(ts)
+
+
+def _fmt_ms(ms: int | None) -> str:
+    """Format milliseconds as 'Xm Ys'."""
+    if ms is None:
+        return "unknown"
+    m, s = divmod(int(ms / 1000), 60)
+    return f"{m}m {s}s"
 
 
 def _fetch(path: str, timeout: float = 2.0):
@@ -545,21 +608,7 @@ def _do_list() -> None:
         count_str = f"{n} checkpoint{'s' if n != 1 else ''}{type_str}"
         stag = p.get("stagnation_count", 0)
         stag_str = f"  ⚠ stagnant ({stag}x)" if stag >= 3 else ""
-        ts = p.get("last_active", "")
-        age = ""
-        if ts:
-            try:
-                dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                diff = datetime.now(timezone.utc) - dt
-                s = diff.total_seconds()
-                if s < 3600:
-                    age = f"{int(s // 60)}m ago"
-                elif s < 86400:
-                    age = f"{int(s // 3600)}h ago"
-                else:
-                    age = f"{int(s // 86400)}d ago"
-            except Exception:
-                age = ts
+        age = _fmt_age(p.get("last_active", ""))
         print(f"  {pid}{count_str:<45}{age}{stag_str}")
 
 
@@ -582,29 +631,8 @@ def _do_diff(project_id: str) -> None:
     from_cp = result.get("from") or result.get("from_checkpoint", {})
     to_cp = result.get("to") or result.get("to_checkpoint", {})
 
-    def _fmt_ts(ts_ms):
-        if not ts_ms:
-            return "unknown"
-        try:
-            dt = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc)
-            diff = datetime.now(timezone.utc) - dt
-            s = diff.total_seconds()
-            if s < 3600:
-                return f"{int(s // 60)}m ago"
-            elif s < 86400:
-                return f"{int(s // 3600)}h ago"
-            return f"{int(s // 86400)}d ago"
-        except Exception:
-            return str(ts_ms)
-
-    def _fmt_ms(ms):
-        if ms is None:
-            return "unknown"
-        m, s = divmod(int(ms / 1000), 60)
-        return f"{m}m {s}s"
-
-    from_age = _fmt_ts(from_cp.get("completed_at_ts"))
-    to_age = _fmt_ts(to_cp.get("completed_at_ts"))
+    from_age = _fmt_age(from_cp.get("completed_at_ts"))
+    to_age = _fmt_age(to_cp.get("completed_at_ts"))
     from_dur = from_cp.get("task_duration_ms")
     to_dur = to_cp.get("task_duration_ms")
     vel_str = ""
@@ -840,25 +868,7 @@ def run() -> None:
             pid = f"{pid}/{args.branch}"
         _do_diff(pid)
     elif args.cmd == "export":
-        pid = args.project or ""
-        if not pid:
-            # derive from git
-            import subprocess
-            try:
-                remote = subprocess.check_output(
-                    ["git", "remote", "get-url", "origin"], stderr=subprocess.DEVNULL, text=True
-                ).strip()
-                name = remote.rstrip("/").split("/")[-1].removesuffix(".git")
-            except Exception:
-                name = Path.cwd().name or "unknown"
-            try:
-                branch = subprocess.check_output(
-                    ["git", "rev-parse", "--abbrev-ref", "HEAD"], stderr=subprocess.DEVNULL, text=True
-                ).strip()
-                pid = f"{name}/{branch}" if branch and branch != "HEAD" else name
-            except Exception:
-                pid = name
-        _do_export(pid, args.output)
+        _do_export(args.project or _current_pid(), args.output)
     else:
         settings.db_path.parent.mkdir(parents=True, exist_ok=True)
         print(f"Context Bridge  http://127.0.0.1:{settings.server_port}")

@@ -17,6 +17,7 @@ import subprocess
 import sys
 import urllib.error
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor, wait as fut_wait
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -75,6 +76,13 @@ def _project_id() -> str:
 
 # ── Git metadata ──────────────────────────────────────────────────────────────
 
+_SKIP_DIRS = frozenset({
+    "node_modules", "__pycache__", ".git", "dist", "build", ".next", ".nuxt",
+    "target", "venv", ".venv", "env", ".env", "vendor", ".tox", "coverage",
+    ".mypy_cache", ".ruff_cache", ".pytest_cache", "site-packages",
+})
+
+
 def _git_meta() -> dict:
     meta: dict = {}
     try:
@@ -84,7 +92,6 @@ def _git_meta() -> dict:
         meta["git_log_recent"] = subprocess.check_output(
             ["git", "log", "--oneline", "-5"], stderr=subprocess.DEVNULL, text=True,
         ).strip()
-        # New: name-status for new-file detection in checkpoint_type classification
         meta["git_name_status"] = subprocess.check_output(
             ["git", "diff", "--name-status", "HEAD"], stderr=subprocess.DEVNULL, text=True,
         ).strip()
@@ -98,7 +105,10 @@ def _git_meta() -> dict:
                     for p in cwd.rglob("*")
                     if p.is_file()
                     and p.stat().st_mtime > cutoff
-                    and not any(part.startswith(".") for part in p.parts)
+                    and not any(
+                        part.startswith(".") or part in _SKIP_DIRS
+                        for part in p.parts
+                    )
                 ),
                 key=lambda f: (cwd / f).stat().st_mtime,
                 reverse=True,
@@ -305,6 +315,42 @@ def _profile_lines() -> list[str]:
     return lines if len(lines) > 1 else []
 
 
+def _build_profile_lines(profile: dict) -> list[str]:
+    """Format a pre-fetched /profile payload — same output as _profile_lines() without HTTP."""
+    if not profile or not (profile.get("checkpoint_count") or profile.get("total_task_checkpoints")):
+        return []
+
+    total_tasks = profile.get("total_task_checkpoints") or profile.get("checkpoint_count", 0)
+    total_projects = profile.get("total_projects") or profile.get("project_count", 0)
+
+    lines = [f"🧑‍💻 DEVELOPER PROFILE (computed from {total_tasks} tasks across {total_projects} projects):"]
+
+    stack = profile.get("preferred_stack") or [t["text"] for t in profile.get("tech_patterns", [])[:5]]
+    if stack:
+        lines.append(f"  Preferred stack: {', '.join(stack[:5])}")
+
+    for bc in profile.get("recurring_blocker_classes", [])[:2]:
+        if bc["count"] >= 2:
+            lines.append(f"  Watch for: {bc['text']} ({bc['count']}x across projects) — you tend to accumulate this")
+
+    avg_vel = profile.get("avg_task_velocity_ms")
+    if avg_vel:
+        avg_s = int(avg_vel / 1000)
+        m, s = divmod(avg_s, 60)
+        lines.append(f"  Avg task pace: {m}m {s}s — if this task is taking much longer, consider decomposing")
+
+    rejected = profile.get("rejected_approaches", [])
+    seen: dict[str, int] = {}
+    for r in rejected:
+        if r.get("attempted"):
+            seen[r["attempted"]] = seen.get(r["attempted"], 0) + 1
+    for attempted, count in sorted(seen.items(), key=lambda kv: -kv[1])[:3]:
+        suffix = f" (abandoned in {count} prior projects)" if count > 1 else " (previously abandoned)"
+        lines.append(f"  Avoid suggesting: {attempted}{suffix}")
+
+    return lines if len(lines) > 1 else []
+
+
 def _pattern_lines(pid: str) -> list[str]:
     patterns = _get(f"/projects/{pid}/patterns")
     if not patterns:
@@ -321,31 +367,21 @@ def _pattern_lines(pid: str) -> list[str]:
 
 
 def _git_state_lines() -> list[str]:
-    """Current repo state: recent commits + uncommitted changes.  (v0.7.0)"""
+    """Format current repo state from _git_meta() output — no extra subprocess calls."""
+    meta = _git_meta()
     lines = []
-    try:
-        log = subprocess.check_output(
-            ["git", "log", "--oneline", "-5"],
-            stderr=subprocess.DEVNULL, text=True,
-        ).strip()
-        if log:
-            lines.append("  Recent commits:")
-            for commit in log.splitlines():
-                lines.append(f"    {commit}")
-    except Exception:
-        pass
 
-    try:
-        stat = subprocess.check_output(
-            ["git", "diff", "--stat", "HEAD"],
-            stderr=subprocess.DEVNULL, text=True,
-        ).strip()
-        if stat:
-            lines.append("  Uncommitted changes:")
-            for line in stat.splitlines()[:5]:  # first 5 lines = file names
-                lines.append(f"    {line}")
-    except Exception:
-        pass
+    log = meta.get("git_log_recent", "").strip()
+    if log:
+        lines.append("  Recent commits:")
+        for commit in log.splitlines()[:3]:
+            lines.append(f"    {commit}")
+
+    diff = meta.get("git_diff_stat", "").strip()
+    if diff and diff != "(no uncommitted changes)":
+        lines.append("  Uncommitted changes:")
+        for line in diff.splitlines()[:5]:  # first 5 lines = file names
+            lines.append(f"    {line}")
 
     return lines
 
@@ -403,11 +439,27 @@ def _on_session_start(event: dict) -> None:
         )
         return
 
-    history = _get(f"/history/{pid}?limit=1")
+    # Fire all independent fetches in parallel — cuts sequential latency from
+    # 5+ round-trips down to ~1 round-trip worth of wall time.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        fut_history  = pool.submit(_get, f"/history/{pid}?limit=10")
+        fut_patterns = pool.submit(_get, f"/projects/{pid}/patterns")
+        fut_drift    = pool.submit(_get, f"/projects/{pid}/goal-drift", 2.0)
+        fut_git      = pool.submit(_git_state_lines)
+        fut_profile  = pool.submit(_get, "/profile")
+
+        history      = fut_history.result()
+        patterns_raw = fut_patterns.result()
+        drift_raw    = fut_drift.result()
+        git_lines    = fut_git.result()
+        profile_raw  = fut_profile.result()
+
     if not history:
-        profile = _profile_lines()
-        if profile:
-            print("\n".join(profile))
+        # New project — show cross-project developer profile if available
+        if profile_raw:
+            profile = _build_profile_lines(profile_raw)
+            if profile:
+                print("\n".join(profile))
         return
 
     latest = history[0]
@@ -432,30 +484,41 @@ def _on_session_start(event: dict) -> None:
         lines.append(f"  Next:     {next_instr}")
     if priority:
         lines.append(f"  Priority: {priority}")
-    lines.extend(_pattern_lines(pid))
 
-    # Semantic search: surface related past work
+    # Patterns from pre-fetched result
+    if patterns_raw:
+        hot = patterns_raw.get("hotspot_files", [])[:3]
+        if hot:
+            lines.append("  Hotspots: " + ", ".join(f"{h['path']} ({h['count']}x)" for h in hot))
+        for b in patterns_raw.get("recurring_blockers", [])[:2]:
+            lines.append(f"  Recurring blocker: {b['text']} ({b['count']}x)")
+
+    # Semantic search: surface related past work (still sequential — conditional on next_instr)
     related = _related_work_lines(next_instr, pid)
     if related:
         lines.extend(related)
 
-    # Git-coherent context: current repo state
-    git_lines = _git_state_lines()
+    # Git state (already computed in parallel)
     if git_lines:
         lines.append("\n[context-bridge] Current repo state:")
         lines.extend(git_lines)
 
     print("\n".join(lines))
 
-    # Attempt replay when stagnant (printed separately for visibility)
+    # Attempt replay — conditional on stagnation, fetched after we know stagnation_count
     replay_lines = _attempt_replay_lines(pid, stagnation_count)
     if replay_lines:
         print("\n".join(replay_lines))
 
-    # Goal drift warning
-    drift_lines = _goal_drift_lines(pid)
-    if drift_lines:
-        print("\n".join(drift_lines))
+    # Goal drift from pre-fetched result
+    if drift_raw and drift_raw.get("drifted"):
+        goals = drift_raw.get("goals", [])
+        if len(goals) >= 3:
+            drift_out = [f"\n[context-bridge] ⚠ GOAL DRIFT ({drift_raw['distinct_count']} goals in recent sessions):"]
+            for g in goals[-4:]:
+                drift_out.append(f"  → '{g}'")
+            drift_out.append("  Confirm the current goal is still what you intend to ship.")
+            print("\n".join(drift_out))
 
 
 # ── PostToolUse ───────────────────────────────────────────────────────────────
@@ -469,7 +532,7 @@ def _on_post_tool_use(event: dict) -> None:
 
     if count % 5 == 0:
         pid = _read(sid, "project_id") or _project_id()
-        history = _get(f"/history/{pid}?limit=1")
+        history = _get(f"/history/{pid}?limit=1", timeout=1.0)
         if history:
             planner = history[0].get("_planner_output") or {}
             new_p = (planner.get("priority_focus") or "").strip()
