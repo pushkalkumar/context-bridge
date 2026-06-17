@@ -10,7 +10,7 @@ UNINSTALL=0
 # PyPI name is claude-context-bridge ("context-bridge" is an unrelated package).
 # The git tag fallback covers the window before a PyPI release exists.
 PYPI_NAME="claude-context-bridge"
-GIT_PIN="git+https://github.com/pushkalkumar/context-bridge.git@v0.4.0"
+GIT_PIN="git+https://github.com/pushkalkumar/context-bridge.git"
 PLIST="$HOME/Library/LaunchAgents/com.context-bridge.server.plist"
 
 for arg in "$@"; do

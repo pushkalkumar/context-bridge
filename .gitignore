@@ -10,3 +10,5 @@ build/
 *.db
 .DS_Store
 promo/
+CONTEXT_BRIDGE_SNAPSHOT.md
+SPRINT_NOTES.md

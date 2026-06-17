@@ -12,7 +12,7 @@ description: >
 ## 1. On session start
 
 - If `[context-bridge] Session context restored:` appears, announce the summary, next instruction, and constraint, then ask "Still accurate?" once per project. If the user has already confirmed once, announce the summary and proceed.
-- If `[context-bridge] Developer profile active:` appears, acknowledge the profile and ask what to work on.
+- If `[context-bridge] Developer profile active:` appears, acknowledge the stack and blocker patterns listed, then ask what to work on.
 
 ## 2. Decision tree
 

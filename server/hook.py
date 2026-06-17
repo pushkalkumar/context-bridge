@@ -294,7 +294,7 @@ def _build_profile_lines(profile: dict) -> list[str]:
     total_tasks = profile.get("total_task_checkpoints") or profile.get("checkpoint_count", 0)
     total_projects = profile.get("total_projects") or profile.get("project_count", 0)
 
-    lines = [f"🧑‍💻 DEVELOPER PROFILE (computed from {total_tasks} tasks across {total_projects} projects):"]
+    lines = [f"[context-bridge] Developer profile active: {total_tasks} tasks across {total_projects} projects"]
 
     stack = profile.get("preferred_stack") or [t["text"] for t in profile.get("tech_patterns", [])[:5]]
     if stack:
@@ -464,8 +464,15 @@ def _on_session_start(event: dict) -> None:
         for b in patterns_raw.get("recurring_blockers", [])[:2]:
             lines.append(f"  Recurring blocker: {b['text']} ({b['count']}x)")
 
-    # Semantic search: surface related past work (still sequential — conditional on next_instr)
-    related = _related_work_lines(next_instr, pid)
+    # Fire related-work search and attempt replay in parallel — both depend on
+    # values computed above (next_instr, stagnation_count) so they run as a
+    # second parallel batch rather than in the first pool.
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        fut_related = pool.submit(_related_work_lines, next_instr, pid) if next_instr else None
+        fut_replay  = pool.submit(_attempt_replay_lines, pid, stagnation_count) if stagnation_count >= 2 else None
+        related      = fut_related.result() if fut_related else []
+        replay_lines = fut_replay.result()  if fut_replay  else []
+
     if related:
         lines.extend(related)
 
@@ -476,8 +483,6 @@ def _on_session_start(event: dict) -> None:
 
     print("\n".join(lines))
 
-    # Attempt replay — conditional on stagnation, fetched after we know stagnation_count
-    replay_lines = _attempt_replay_lines(pid, stagnation_count)
     if replay_lines:
         print("\n".join(replay_lines))
 
@@ -544,11 +549,15 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         if isinstance(tool_response, dict)
         else str(tool_response)
     )
+    _BLOCKER_KWS = ("error:", "failed:", "traceback", "exception:", "blocked:", "unable to",
+                    "cannot ", "exit code", "exited with", "permission denied", "not found:")
     blockers = []
     for line in result_text.splitlines():
-        if any(kw in line.lower() for kw in ("error:", "failed:", "blocked:", "unable to")):
-            blockers.append(line.strip()[:200])
-            break
+        stripped = line.strip()
+        if stripped and any(kw in stripped.lower() for kw in _BLOCKER_KWS):
+            blockers.append(stripped[:200])
+            if len(blockers) >= 3:
+                break
 
     payload = {
         "project_id": pid,

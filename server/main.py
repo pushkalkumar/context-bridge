@@ -141,14 +141,14 @@ async def dashboard() -> HTMLResponse:
 
 
 @app.post("/checkpoint", response_model=CheckpointAck)
-async def checkpoint(cp: CheckpointIn) -> CheckpointAck:
+async def checkpoint(cp: CheckpointIn, background_tasks: BackgroundTasks) -> CheckpointAck:
     """Store a checkpoint without running the planner."""
     data = _prepare_checkpoint_data(cp)
     history = get_recent_checkpoints(data["project_id"], n=10)
     stag = compute_stagnation_from_history(data["current_task"], history)
     data["stagnation_count"] = stag
     checkpoint_id = save_checkpoint(data)
-    save_embedding(checkpoint_id, _embed_text_for(data))
+    background_tasks.add_task(save_embedding, checkpoint_id, _embed_text_for(data))
     logger.info(
         "checkpoint  project=%s  task=%r  stagnation=%d  type=%s",
         data["project_id"], data["current_task"], stag, data["checkpoint_type"],

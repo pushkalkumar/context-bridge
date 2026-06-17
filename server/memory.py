@@ -240,16 +240,10 @@ def classify_checkpoint_type(current_state: dict, hint: str | None = None) -> st
     total_lines = 0
     for line in diff_stat.splitlines():
         if "|" in line:
-            parts = line.split("|")
-            if len(parts) >= 2:
-                num_str = ""
-                for ch in parts[1].strip():
-                    if ch.isdigit():
-                        num_str += ch
-                    else:
-                        break
-                if num_str:
-                    total_lines += int(num_str)
+            after_pipe = line.split("|", 1)[1]
+            m = re.match(r"\s*(\d+)", after_pipe)
+            if m:
+                total_lines += int(m.group(1))
 
     return "task" if total_lines >= 10 else "scratch"
 
