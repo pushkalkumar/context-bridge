@@ -1,7 +1,7 @@
-"""Tests for the `context-bridge why` command (_do_why)."""
+"""Tests for the `context-bridge why` command (do_why)."""
 import pytest
 
-from server.main import _do_why
+from server.cli import do_why
 
 
 @pytest.fixture
@@ -22,7 +22,7 @@ def _stub_fetch(responses: dict):
 
 def test_why_no_stagnation(monkeypatch, capsys):
     """No stagnation: shows 'progressing normally' and velocity data."""
-    monkeypatch.setattr("server.main._fetch", _stub_fetch({
+    monkeypatch.setattr("server.cli._fetch", _stub_fetch({
         "/health": {"status": "ok", "port": 7723},
         "/history/": [{"stagnation_count": 1, "current_task": "Write tests"}],
         "/velocity/": {
@@ -32,20 +32,20 @@ def test_why_no_stagnation(monkeypatch, capsys):
             "alert": False,
         },
     }))
-    _do_why()
+    do_why()
     out = capsys.readouterr().out
-    assert "none" in out
+    assert "No stagnation" in out
     assert "on track" in out
 
 
 def test_why_approaching_stagnation(monkeypatch, capsys):
     """stagnation_count == 2: shows 'approaching stagnation' warning."""
-    monkeypatch.setattr("server.main._fetch", _stub_fetch({
+    monkeypatch.setattr("server.cli._fetch", _stub_fetch({
         "/health": {"status": "ok", "port": 7723},
         "/history/": [{"stagnation_count": 2, "current_task": "Implement /login"}],
         "/velocity/": {"avg_duration_ms": None, "current_duration_ms": None, "alert": False},
     }))
-    _do_why()
+    do_why()
     out = capsys.readouterr().out
     assert "APPROACHING STAGNATION" in out
     assert "/login" in out
@@ -54,7 +54,7 @@ def test_why_approaching_stagnation(monkeypatch, capsys):
 
 def test_why_full_stagnation(monkeypatch, capsys):
     """stagnation_count >= 3: shows full stagnation report with blocker and action."""
-    monkeypatch.setattr("server.main._fetch", _stub_fetch({
+    monkeypatch.setattr("server.cli._fetch", _stub_fetch({
         "/health": {"status": "ok", "port": 7723},
         "/history/": [{"stagnation_count": 3, "current_task": "Implement /login"}],
         "/projects/": {
@@ -70,9 +70,9 @@ def test_why_full_stagnation(monkeypatch, capsys):
             "alert": True,
         },
     }))
-    _do_why()
+    do_why()
     out = capsys.readouterr().out
-    assert "STAGNATING" in out
+    assert "STAGNATION DETECTED" in out
     assert "bcrypt import error" in out
     assert "Break this into smaller tasks" in out
     assert "slower than baseline" in out
@@ -81,19 +81,19 @@ def test_why_full_stagnation(monkeypatch, capsys):
 
 def test_why_backend_not_running(monkeypatch, capsys):
     """Backend down: shows clear error message."""
-    monkeypatch.setattr("server.main._fetch", _stub_fetch({"/health": None}))
-    _do_why()
+    monkeypatch.setattr("server.cli._fetch", _stub_fetch({"/health": None}))
+    do_why()
     out = capsys.readouterr().out
     assert "not running" in out
 
 
 def test_why_velocity_insufficient_history(monkeypatch, capsys):
     """Fewer than 5 tasks: shows insufficient history message."""
-    monkeypatch.setattr("server.main._fetch", _stub_fetch({
+    monkeypatch.setattr("server.cli._fetch", _stub_fetch({
         "/health": {"status": "ok", "port": 7723},
         "/history/": [{"stagnation_count": 1, "current_task": "Write tests"}],
         "/velocity/": {"avg_duration_ms": None, "current_duration_ms": None, "alert": False},
     }))
-    _do_why()
+    do_why()
     out = capsys.readouterr().out
     assert "insufficient history" in out

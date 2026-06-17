@@ -150,14 +150,14 @@ def test_export_output_path_default(tmp_path, monkeypatch, no_llm, isolated_db):
             return {"markdown": md_content}
         return None
 
-    from server import main as server_main
-    monkeypatch.setattr(server_main, "_fetch", _mock_fetch)
+    from server import cli as server_cli
+    monkeypatch.setattr(server_cli, "_fetch", _mock_fetch)
 
     import os
     original_cwd = os.getcwd()
     try:
         os.chdir(tmp_path)
-        server_main._do_export("cli-export-proj", "CONTEXT_BRIDGE_SNAPSHOT.md")
+        server_cli.do_export("cli-export-proj", "CONTEXT_BRIDGE_SNAPSHOT.md")
         output = tmp_path / "CONTEXT_BRIDGE_SNAPSHOT.md"
         assert output.exists()
         content = output.read_text()

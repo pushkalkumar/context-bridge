@@ -143,7 +143,7 @@ def _run_anthropic(
         client = anthropic.Anthropic(api_key=settings.anthropic_api_key)
         prompt = _build_prompt(checkpoint["user_goal"], history, checkpoint, stagnation_report, attempt_replay)
         msg = client.messages.create(
-            model="claude-sonnet-4-6",
+            model=settings.planner_model,
             max_tokens=1024,
             system="Return ONLY valid JSON matching the schema. No markdown, no explanation.",
             messages=[{"role": "user", "content": prompt}],

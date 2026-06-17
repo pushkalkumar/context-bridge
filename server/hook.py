@@ -34,18 +34,30 @@ def _sanitize_sid(sid: str) -> str:
     return sid.replace("/", "_").replace("\\", "_")
 
 
-def _sp(sid: str, key: str) -> Path:
+def _state_path(sid: str) -> Path:
     _STATE_DIR.mkdir(parents=True, exist_ok=True)
-    return _STATE_DIR / f"{_sanitize_sid(sid)}_{key}.txt"
+    return _STATE_DIR / f"{_sanitize_sid(sid)}.json"
+
+
+def _read_state(sid: str) -> dict:
+    p = _state_path(sid)
+    try:
+        return json.loads(p.read_text()) if p.exists() else {}
+    except (ValueError, OSError):
+        return {}
 
 
 def _read(sid: str, key: str, default: str = "") -> str:
-    p = _sp(sid, key)
-    return p.read_text().strip() if p.exists() else default
+    return str(_read_state(sid).get(key, default))
 
 
 def _write(sid: str, key: str, value: str) -> None:
-    _sp(sid, key).write_text(str(value))
+    p = _state_path(sid)
+    state = _read_state(sid)
+    state[key] = value
+    tmp = p.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    tmp.replace(p)
 
 
 # ── Project ID ────────────────────────────────────────────────────────────────
@@ -211,21 +223,22 @@ def _on_pre_tool_use(event: dict) -> None:
     blockers = matching.get("blockers") or []
     blocker_class = (matching.get("planner_blocker_class") or "none").strip()
 
-    w = 16
     lines = [
-        f"\n[context-bridge] ⚠ STAGNATION RISK  '{incoming_task[:70]}'  ({prev_stag}× in history)",
+        f"\n[context-bridge] ⚠ STAGNATION RISK — '{incoming_task[:70]}' "
+        f"has appeared {prev_stag}× in recent history.",
     ]
     if blockers:
-        lines.append(f"  {'Last blocker':<{w}}{blockers[0][:120]}")
+        lines.append(f"  Last recorded blocker: {blockers[0][:120]}")
     if blocker_class and blocker_class != "none":
         label = _BLOCKER_CLASS_LABELS.get(blocker_class, blocker_class)
-        lines.append(f"  {'Pattern':<{w}}{label}")
+        lines.append(f"  Pattern type: {label}")
     prev_instr = (planner.get("next_instruction") or "").strip()
     if prev_instr and not prev_instr.startswith("⚠"):
         first_line = prev_instr.split("\n")[0][:140]
-        lines.append(f"  {'Previous plan':<{w}}{first_line}")
+        lines.append(f"  Previous plan: {first_line}")
     lines.append(
-        f"  {'Action':<{w}}decompose into the smallest completable subtask  →  context-bridge why\n"
+        "  Decompose into the smallest completable subtask before starting."
+        " Run `context-bridge why` for root-cause analysis.\n"
     )
     print("\n".join(lines))
 
@@ -273,49 +286,8 @@ def _related_work_lines(next_instr: str, current_pid: str) -> list[str]:
 
 # ── SessionStart ──────────────────────────────────────────────────────────────
 
-def _profile_lines() -> list[str]:
-    """Computed cross-project developer profile, shown when a project has no history."""
-    profile = _get("/profile")
-    if not profile or not (profile.get("checkpoint_count") or profile.get("total_task_checkpoints")):
-        return []
-
-    total_tasks = profile.get("total_task_checkpoints") or profile.get("checkpoint_count", 0)
-    total_projects = profile.get("total_projects") or profile.get("project_count", 0)
-
-    lines = [f"🧑‍💻 DEVELOPER PROFILE (computed from {total_tasks} tasks across {total_projects} projects):"]
-
-    # Preferred stack from computed field, fall back to tech_patterns
-    stack = profile.get("preferred_stack") or [t["text"] for t in profile.get("tech_patterns", [])[:5]]
-    if stack:
-        lines.append(f"  Preferred stack: {', '.join(stack[:5])}")
-
-    # Recurring blocker classes from planner analysis
-    for bc in profile.get("recurring_blocker_classes", [])[:2]:
-        if bc["count"] >= 2:
-            lines.append(f"  Watch for: {bc['text']} ({bc['count']}x across projects) — you tend to accumulate this")
-
-    # Avg task velocity
-    avg_vel = profile.get("avg_task_velocity_ms")
-    if avg_vel:
-        avg_s = int(avg_vel / 1000)
-        m, s = divmod(avg_s, 60)
-        lines.append(f"  Avg task pace: {m}m {s}s — if this task is taking much longer, consider decomposing")
-
-    # Rejected approaches from failure events
-    rejected = profile.get("rejected_approaches", [])
-    seen: dict[str, int] = {}
-    for r in rejected:
-        if r.get("attempted"):
-            seen[r["attempted"]] = seen.get(r["attempted"], 0) + 1
-    for attempted, count in sorted(seen.items(), key=lambda kv: -kv[1])[:3]:
-        suffix = f" (abandoned in {count} prior projects)" if count > 1 else " (previously abandoned)"
-        lines.append(f"  Avoid suggesting: {attempted}{suffix}")
-
-    return lines if len(lines) > 1 else []
-
-
 def _build_profile_lines(profile: dict) -> list[str]:
-    """Format a pre-fetched /profile payload — same output as _profile_lines() without HTTP."""
+    """Format a /profile payload into display lines for session start."""
     if not profile or not (profile.get("checkpoint_count") or profile.get("total_task_checkpoints")):
         return []
 
@@ -476,22 +448,21 @@ def _on_session_start(event: dict) -> None:
     if not (next_instr or ctx):
         return
 
-    w = 10
     lines = ["[context-bridge] Session context restored:"]
     if ctx:
-        lines.append(f"  {'Summary':<{w}}{ctx}")
+        lines.append(f"  Summary:  {ctx}")
     if next_instr:
-        lines.append(f"  {'Next':<{w}}{next_instr}")
+        lines.append(f"  Next:     {next_instr}")
     if priority:
-        lines.append(f"  {'Priority':<{w}}{priority}")
+        lines.append(f"  Priority: {priority}")
 
     # Patterns from pre-fetched result
     if patterns_raw:
         hot = patterns_raw.get("hotspot_files", [])[:3]
         if hot:
-            lines.append("  Hotspots  " + ", ".join(f"{h['path']} ({h['count']}×)" for h in hot))
+            lines.append("  Hotspots: " + ", ".join(f"{h['path']} ({h['count']}x)" for h in hot))
         for b in patterns_raw.get("recurring_blockers", [])[:2]:
-            lines.append(f"  Blocker   {b['text']} ({b['count']}×)")
+            lines.append(f"  Recurring blocker: {b['text']} ({b['count']}x)")
 
     # Semantic search: surface related past work (still sequential — conditional on next_instr)
     related = _related_work_lines(next_instr, pid)
@@ -500,7 +471,7 @@ def _on_session_start(event: dict) -> None:
 
     # Git state (already computed in parallel)
     if git_lines:
-        lines.append("\n[context-bridge] Repo state:")
+        lines.append("\n[context-bridge] Current repo state:")
         lines.extend(git_lines)
 
     print("\n".join(lines))
@@ -540,7 +511,7 @@ def _on_post_tool_use(event: dict) -> None:
                 _write(sid, "priority", new_p)
                 print(f"[context-bridge] Priority updated: {new_p}")
 
-    if tool in _TASK_TOOL_NAMES or tool.lower().startswith("task"):
+    if tool in _TASK_TOOL_NAMES:
         _auto_checkpoint(event, sid)
 
 
@@ -607,17 +578,14 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         _write(sid, "priority", priority)
 
     next_instr = (response.get("next_instruction") or "").strip()
-    w = 14
     if priority and priority != old_p:
-        print(f"[context-bridge] Checkpoint saved")
-        print(f"  {'Priority':<{w}}{priority}")
+        print(f"[context-bridge] Checkpoint saved. Priority: {priority}")
     elif next_instr:
         display = next_instr.lstrip("⚠").strip()
         first_line = display.split("\n")[0][:120]
-        print(f"[context-bridge] Checkpoint saved")
-        print(f"  {'Next':<{w}}{first_line}")
+        print(f"[context-bridge] Checkpoint saved. Next: {first_line}")
     else:
-        print("[context-bridge] Checkpoint saved")
+        print("[context-bridge] Checkpoint saved.")
 
     # Surface planner intelligence when noteworthy
     confidence = response.get("confidence")
@@ -625,14 +593,17 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
     decomposition = response.get("decomposition_suggested", False)
     alternatives = response.get("alternatives") or []
 
+    meta_parts = []
     if confidence is not None and confidence < 0.75:
-        print(f"  {'Confidence':<{w}}{confidence:.0%}  (low — verify approach before proceeding)")
+        meta_parts.append(f"confidence {confidence:.0%}")
     if blocker_class and blocker_class != "none":
-        print(f"  {'Blocker class':<{w}}{blocker_class}")
+        meta_parts.append(f"blocker: {blocker_class}")
     if decomposition:
-        print(f"  {'Decompose':<{w}}yes — break into subtasks ≤ 30 min")
+        meta_parts.append("decompose")
+    if meta_parts:
+        print(f"[context-bridge]   {' · '.join(meta_parts)}")
     if alternatives:
-        print(f"  {'Alt':<{w}}{alternatives[0][:100]}")
+        print(f"[context-bridge]   Alt: {alternatives[0][:100]}")
 
     report = response.get("stagnation_report")
     if report:
@@ -640,10 +611,10 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         count = report.get("checkpoint_count", 0)
         blocker = report.get("primary_blocker") or "none recorded"
         rec = report.get("recommendation", "")
-        print(f"\n[context-bridge] ⚠ STAGNATION  ({count} sessions · {hours}h)")
-        print(f"  {'Blocker':<{w}}{blocker}")
+        print(f"\n[context-bridge] ⚠ STAGNATION ({count} sessions, {hours}h stuck)")
+        print(f"  Blocker: {blocker}")
         if rec:
-            print(f"  {'Action':<{w}}{rec[:160]}")
+            print(f"  Action:  {rec[:160]}")
         print()
 
     # Blocker history match: surface if this error has been seen before  (v0.7.0)
@@ -654,11 +625,11 @@ def _auto_checkpoint(event: dict, sid: str) -> None:
         resolved = blocker_match.get("resolved", False)
         if resolved:
             print(f"[context-bridge] ⚠ Recurring error: '{mb}'")
-            print(f"  {'Previously':<{w}}resolved — fix was: {fix}")
-            print(f"  {'Check':<{w}}verify the fix was committed/persisted")
+            print(f"  Previously resolved → fix was: {fix}")
+            print(f"  If it's back: verify the fix was committed/persisted.")
         else:
             print(f"[context-bridge] ⚠ Persistent error: '{mb}'")
-            print(f"  {'Seen before':<{w}}never resolved — previous plan: {fix}")
+            print(f"  Seen before, never resolved. Previous plan: {fix}")
 
 
 # ── Stop ─────────────────────────────────────────────────────────────────────
@@ -712,11 +683,10 @@ def _on_stop(event: dict) -> None:
             file=sys.stderr,
         )
 
-    for key in ("tool_count", "priority", "goal", "project_id"):
-        try:
-            _sp(sid, key).unlink(missing_ok=True)
-        except OSError:
-            pass
+    try:
+        _state_path(sid).unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

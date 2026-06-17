@@ -427,13 +427,13 @@ def test_profile_aggregates_across_projects(client, monkeypatch):
 
 def test_configure_hooks_registers_all_lifecycle_events(tmp_path, monkeypatch):
     """install must wire every event hook.py handles, idempotently."""
-    from server import main as server_main
+    from server import install as server_install
 
     settings_path = tmp_path / "settings.json"
-    monkeypatch.setattr(server_main, "_SETTINGS_PATH", settings_path)
+    monkeypatch.setattr(server_install, "_SETTINGS_PATH", settings_path)
 
-    server_main._configure_hooks()
-    server_main._configure_hooks()  # second run must not duplicate entries
+    server_install._configure_hooks()
+    server_install._configure_hooks()  # second run must not duplicate entries
 
     hooks = json.loads(settings_path.read_text())["hooks"]
     for event in ("SessionStart", "PostToolUse", "Stop"):

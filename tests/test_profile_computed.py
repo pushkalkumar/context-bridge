@@ -124,35 +124,22 @@ def test_profile_total_task_checkpoints(client, no_llm):
 
 
 def test_profile_injected_on_new_project(monkeypatch, no_llm):
-    """SessionStart with unknown project → _profile_lines() returns content."""
+    """SessionStart with unknown project → _build_profile_lines() returns content."""
     from server import hook
 
-    call_log = {}
+    profile_payload = {
+        "checkpoint_count": 47,
+        "total_task_checkpoints": 47,
+        "total_projects": 3,
+        "project_count": 3,
+        "preferred_stack": ["Python", "TypeScript"],
+        "tech_patterns": [],
+        "recurring_blocker_classes": [{"text": "technical_debt", "count": 4}],
+        "common_blockers": [],
+        "avg_task_velocity_ms": 142_000,
+        "rejected_approaches": [],
+    }
 
-    def _mock_get(path: str):
-        call_log[path] = True
-        if path == "/health":
-            return {"status": "ok"}
-        if path.startswith("/history/"):
-            return []  # no history = new project
-        if path == "/profile":
-            return {
-                "checkpoint_count": 47,
-                "total_task_checkpoints": 47,
-                "total_projects": 3,
-                "project_count": 3,
-                "preferred_stack": ["Python", "TypeScript"],
-                "tech_patterns": [],
-                "recurring_blocker_classes": [{"text": "technical_debt", "count": 4}],
-                "common_blockers": [],
-                "avg_task_velocity_ms": 142_000,
-                "rejected_approaches": [],
-            }
-        return None
-
-    monkeypatch.setattr(hook, "_get", _mock_get)
-    monkeypatch.setattr(hook, "_project_id", lambda: "new-project")
-
-    lines = hook._profile_lines()
+    lines = hook._build_profile_lines(profile_payload)
     combined = "\n".join(lines)
     assert "DEVELOPER PROFILE" in combined or "Preferred stack" in combined

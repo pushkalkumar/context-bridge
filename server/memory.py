@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 import sqlite3
 from collections import Counter
 from contextlib import contextmanager
@@ -177,9 +178,9 @@ def search_checkpoints(
             placeholders = ",".join("?" * len(checkpoint_ids))
             checkpoints = con.execute(
                 f"""
-                SELECT rowid, project_id, checkpoint_type, completed_at_ts, planner_confidence, data
+                SELECT id, project_id, checkpoint_type, completed_at_ts, planner_confidence, data
                 FROM checkpoints
-                WHERE rowid IN ({placeholders})
+                WHERE id IN ({placeholders})
                 AND checkpoint_type IN ('task', 'session')
                 """,
                 checkpoint_ids,
@@ -272,7 +273,7 @@ def _get_prev_completed_at_ts(project_id: str) -> int | None:
     """Return completed_at_ts of the most recent checkpoint for this project."""
     with _conn() as con:
         row = con.execute(
-            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND completed_at_ts IS NOT NULL ORDER BY rowid DESC LIMIT 1",
+            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND completed_at_ts IS NOT NULL ORDER BY id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
     return row[0] if row else None
@@ -291,12 +292,12 @@ def get_velocity(project_id: str) -> dict | None:
     with _conn() as con:
         # Latest task checkpoint for current_duration_ms calculation
         latest = con.execute(
-            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY rowid DESC LIMIT 1",
+            "SELECT completed_at_ts FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY id DESC LIMIT 1",
             (project_id,),
         ).fetchone()
         # Last 10 task checkpoints with non-null task_duration_ms for baseline
         baseline_rows = con.execute(
-            "SELECT task_duration_ms FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' AND task_duration_ms IS NOT NULL ORDER BY rowid DESC LIMIT 10",
+            "SELECT task_duration_ms FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' AND task_duration_ms IS NOT NULL ORDER BY id DESC LIMIT 10",
             (project_id,),
         ).fetchall()
 
@@ -336,10 +337,10 @@ def purge_old_scratch_checkpoints() -> int:
 # ── Core CRUD ─────────────────────────────────────────────────────────────────
 
 def compute_stagnation_count(project_id: str, new_task: str) -> int:
-    """Stagnation streak for new_task (excludes scratch and session checkpoints)."""
+    """Stagnation streak for new_task (excludes scratch checkpoints)."""
     with _conn() as con:
         rows = con.execute(
-            "SELECT data, stagnation_count FROM checkpoints WHERE project_id = ? AND checkpoint_type = 'task' ORDER BY timestamp DESC, rowid DESC LIMIT 1",
+            "SELECT data, stagnation_count FROM checkpoints WHERE project_id = ? AND checkpoint_type != 'scratch' ORDER BY timestamp DESC, id DESC LIMIT 1",
             (project_id,),
         ).fetchall()
     if not rows:
@@ -359,7 +360,7 @@ def compute_stagnation_from_history(new_task: str, history: list[dict]) -> int:
     """
     norm = _normalize(new_task)
     for cp in history:
-        if cp.get("checkpoint_type") in ("scratch", "session"):
+        if cp.get("checkpoint_type") == "scratch":
             continue
         if _normalize(cp.get("current_task", "")) == norm:
             return cp.get("stagnation_count", 1) + 1
@@ -403,7 +404,7 @@ def delete_project(project_id: str) -> int:
 def get_recent_checkpoints(project_id: str, n: int = 10) -> list[dict]:
     with _conn() as con:
         rows = con.execute(
-            "SELECT data FROM checkpoints WHERE project_id = ? ORDER BY timestamp DESC, rowid DESC LIMIT ?",
+            "SELECT data FROM checkpoints WHERE project_id = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
             (project_id, n),
         ).fetchall()
     return [json.loads(r[0]) for r in rows]
@@ -414,21 +415,15 @@ def get_all_projects() -> list[dict]:
         rows = con.execute(
             """
             SELECT
-                c.project_id,
+                project_id,
                 COUNT(*) as checkpoint_count,
-                MAX(c.timestamp) as last_active,
-                SUM(CASE WHEN c.checkpoint_type = 'task'    THEN 1 ELSE 0 END) as task_count,
-                SUM(CASE WHEN c.checkpoint_type = 'scratch' THEN 1 ELSE 0 END) as scratch_count,
-                SUM(CASE WHEN c.checkpoint_type = 'session' THEN 1 ELSE 0 END) as session_count,
-                (
-                    SELECT stagnation_count
-                    FROM checkpoints
-                    WHERE project_id = c.project_id AND checkpoint_type = 'task'
-                    ORDER BY timestamp DESC, rowid DESC
-                    LIMIT 1
-                ) as current_stagnation
-            FROM checkpoints c
-            GROUP BY c.project_id
+                MAX(timestamp) as last_active,
+                MAX(stagnation_count) as max_stagnation,
+                SUM(CASE WHEN checkpoint_type = 'task'    THEN 1 ELSE 0 END) as task_count,
+                SUM(CASE WHEN checkpoint_type = 'scratch' THEN 1 ELSE 0 END) as scratch_count,
+                SUM(CASE WHEN checkpoint_type = 'session' THEN 1 ELSE 0 END) as session_count
+            FROM checkpoints
+            GROUP BY project_id
             ORDER BY last_active DESC
             """
         ).fetchall()
@@ -437,8 +432,8 @@ def get_all_projects() -> list[dict]:
             "project_id": r[0],
             "checkpoint_count": r[1],
             "last_active": r[2],
-            "stagnation_count": r[6] or 1,
-            "type_breakdown": {"task": r[3] or 0, "scratch": r[4] or 0, "session": r[5] or 0},
+            "stagnation_count": r[3],
+            "type_breakdown": {"task": r[4] or 0, "scratch": r[5] or 0, "session": r[6] or 0},
         }
         for r in rows
     ]
@@ -471,7 +466,7 @@ def get_diff_data(project_id: str) -> dict | None:
                       planner_decomposition_suggested, completed_at_ts
                FROM checkpoints
                WHERE project_id = ? AND checkpoint_type = 'task'
-               ORDER BY rowid DESC
+               ORDER BY id DESC
                LIMIT 2""",
             (project_id,),
         ).fetchall()
@@ -639,41 +634,65 @@ def build_stagnation_report(project_id: str, stuck_task: str | None = None, n: i
 
 
 def extract_patterns(project_id: str) -> dict:
-    # Cap at 500 recent checkpoints — pattern detection needs recency, not full history
-    checkpoints = get_recent_checkpoints(project_id, n=500)
+    """Compute hotspot files, recurring blockers, and recurring tasks via SQL.
 
-    file_counts: Counter = Counter()
-    blocker_counts: Counter = Counter()
-    task_counts: Counter = Counter()
-    task_display: dict[str, str] = {}
+    Uses json_each to extract array elements from the JSON blob without loading
+    all checkpoint data into Python — avoids scanning 500 full rows in memory.
+    """
+    with _conn() as con:
+        # Dedup files within each checkpoint (matching the previous Counter(set(...)) logic)
+        file_rows = con.execute(
+            """
+            SELECT path, COUNT(*) as cnt
+            FROM (
+                SELECT DISTINCT c.id, je.value AS path
+                FROM (SELECT id, data FROM checkpoints WHERE project_id = ? ORDER BY id DESC LIMIT 500) c,
+                     json_each(json_extract(c.data, '$.current_state.files_modified')) je
+            )
+            GROUP BY path
+            HAVING cnt >= 3
+            ORDER BY cnt DESC
+            """,
+            (project_id,),
+        ).fetchall()
 
-    for c in checkpoints:
-        state = c.get("current_state") or {}
-        file_counts.update(set(state.get("files_modified", [])))
-        blocker_counts.update(c.get("blockers", []))
-        task = c.get("current_task", "")
-        norm = _normalize(task)
-        if norm and norm != "end of session":
-            task_counts[norm] += 1
-            task_display.setdefault(norm, task)
+        blocker_rows = con.execute(
+            """
+            SELECT je.value AS text, COUNT(*) AS cnt
+            FROM (SELECT data FROM checkpoints WHERE project_id = ? ORDER BY id DESC LIMIT 500),
+                 json_each(json_extract(data, '$.blockers')) je
+            GROUP BY text
+            HAVING cnt >= 2
+            ORDER BY cnt DESC
+            """,
+            (project_id,),
+        ).fetchall()
+
+        # Group by lowercased+trimmed task; surface the first (min) original form
+        task_rows = con.execute(
+            """
+            SELECT MIN(task) AS display, lower(trim(task)) AS norm, COUNT(*) AS cnt
+            FROM (
+                SELECT json_extract(data, '$.current_task') AS task
+                FROM checkpoints
+                WHERE project_id = ?
+                ORDER BY id DESC
+                LIMIT 500
+            )
+            WHERE norm != '' AND norm != 'end of session'
+            GROUP BY norm
+            HAVING cnt >= 3
+            ORDER BY cnt DESC
+            """,
+            (project_id,),
+        ).fetchall()
 
     return {
         "project_id": project_id,
-        "hotspot_files": [
-            {"path": path, "count": count}
-            for path, count in file_counts.most_common()
-            if count >= 3
-        ],
-        "recurring_blockers": [
-            {"text": text, "count": count}
-            for text, count in blocker_counts.most_common()
-            if count >= 2
-        ],
-        "recurring_tasks": [
-            {"text": task_display[norm], "count": count}
-            for norm, count in task_counts.most_common()
-            if count >= 3
-        ],
+        "hotspot_files":      [{"path": r[0], "count": r[1]} for r in file_rows],
+        "recurring_blockers": [{"text": r[0], "count": r[1]} for r in blocker_rows],
+        # task_rows: (display, norm, cnt) — display at [0], count at [2]
+        "recurring_tasks":    [{"text": r[0], "count": r[2]} for r in task_rows],
     }
 
 
@@ -693,12 +712,41 @@ _EXT_TO_STACK: dict[str, str] = {
 
 
 def build_profile() -> dict:
-    """Cross-project developer profile aggregated from stored checkpoints."""
+    """Cross-project developer profile aggregated from stored checkpoints.
+
+    Uses targeted SQL queries instead of loading 1000 full JSON blobs — files
+    and blockers are extracted via json_each; only ADR and failure events load
+    their full blob since we need nested event_data fields.
+    """
     with _conn() as con:
-        rows = con.execute(
-            "SELECT data FROM checkpoints ORDER BY id DESC LIMIT 1000"
+        project_rows = con.execute(
+            "SELECT DISTINCT json_extract(data, '$.project_id') FROM checkpoints ORDER BY id DESC LIMIT 1000"
         ).fetchall()
-        # New computed fields from DB columns
+
+        file_rows = con.execute(
+            """
+            SELECT je.value
+            FROM (SELECT data FROM checkpoints ORDER BY id DESC LIMIT 1000),
+                 json_each(json_extract(data, '$.current_state.files_modified')) je
+            """
+        ).fetchall()
+
+        blocker_rows = con.execute(
+            """
+            SELECT je.value
+            FROM (SELECT data FROM checkpoints ORDER BY id DESC LIMIT 1000),
+                 json_each(json_extract(data, '$.blockers')) je
+            """
+        ).fetchall()
+
+        adr_rows = con.execute(
+            "SELECT data FROM checkpoints WHERE event_type = 'adr' ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+
+        failure_rows = con.execute(
+            "SELECT data FROM checkpoints WHERE event_type = 'failure' ORDER BY id DESC LIMIT 200"
+        ).fetchall()
+
         velocity_rows = con.execute(
             "SELECT task_duration_ms FROM checkpoints WHERE checkpoint_type = 'task' AND task_duration_ms IS NOT NULL"
         ).fetchall()
@@ -708,45 +756,48 @@ def build_profile() -> dict:
         total_task_checkpoints = con.execute(
             "SELECT COUNT(*) FROM checkpoints WHERE checkpoint_type = 'task'"
         ).fetchone()[0]
+        total_checkpoints = con.execute(
+            "SELECT COUNT(*) FROM checkpoints ORDER BY id DESC LIMIT 1000"
+        ).fetchone()[0]
 
-    checkpoints = [json.loads(r[0]) for r in rows]
+    projects: set[str] = {r[0] for r in project_rows if r[0]}
 
     ext_counts: Counter = Counter()
+    for (filepath,) in file_rows:
+        ext = Path(filepath).suffix.lower()
+        if ext:
+            ext_counts[ext] += 1
+
     blocker_counts: Counter = Counter()
+    for (blocker,) in blocker_rows:
+        if blocker:
+            blocker_counts[blocker] += 1
+
     tech_counts: Counter = Counter()
-    rejected: list[dict] = []
-    projects: set[str] = set()
-
-    for c in checkpoints:
-        projects.add(c.get("project_id", ""))
+    for (data_json,) in adr_rows:
+        c = json.loads(data_json)
         state = c.get("current_state") or {}
-        for f in state.get("files_modified", []):
-            ext = Path(f).suffix.lower()
-            if ext:
-                ext_counts[ext] += 1
-        blocker_counts.update(c.get("blockers", []))
-
-        event_type = c.get("event_type", "checkpoint")
         event_data = c.get("event_data") or {}
-        if event_type == "adr":
-            notes = " ".join(
-                str(v) for v in (state.get("architecture_notes", ""), *event_data.values())
-            ).lower()
-            for kw in _STACK_KEYWORDS:
-                if kw in notes:
-                    tech_counts[kw] += 1
-        elif event_type == "failure":
-            rejected.append({
-                "attempted": str(event_data.get("attempted", c.get("current_task", ""))),
-                "failed_because": str(event_data.get("failed_because", "")),
-                "project_id": c.get("project_id", ""),
-            })
+        notes = " ".join(
+            str(v) for v in (state.get("architecture_notes", ""), *event_data.values())
+        ).lower()
+        for kw in _STACK_KEYWORDS:
+            if kw in notes:
+                tech_counts[kw] += 1
 
-    # Compute avg velocity
+    rejected: list[dict] = []
+    for (data_json,) in failure_rows:
+        c = json.loads(data_json)
+        event_data = c.get("event_data") or {}
+        rejected.append({
+            "attempted": str(event_data.get("attempted", c.get("current_task", ""))),
+            "failed_because": str(event_data.get("failed_because", "")),
+            "project_id": c.get("project_id", ""),
+        })
+
     durations = [r[0] for r in velocity_rows if r[0]]
     avg_task_velocity_ms = round(sum(durations) / len(durations)) if durations else None
 
-    # Compute preferred_stack from top file extensions
     preferred_stack: list[str] = []
     seen_stacks: set[str] = set()
     for ext, _ in ext_counts.most_common(20):
@@ -757,21 +808,16 @@ def build_profile() -> dict:
         if len(preferred_stack) >= 5:
             break
 
-    recurring_blocker_classes = [
-        {"text": bc, "count": cnt} for bc, cnt in blocker_class_rows
-    ]
-
     return {
         "project_count": len(projects),
-        "checkpoint_count": len(checkpoints),
+        "checkpoint_count": min(total_checkpoints, 1000),
         "top_file_types": [{"text": ext, "count": n} for ext, n in ext_counts.most_common(5)],
         "common_blockers": [{"text": b, "count": n} for b, n in blocker_counts.most_common(5)],
         "tech_patterns": [{"text": kw, "count": n} for kw, n in tech_counts.most_common(10)],
         "rejected_approaches": rejected,
-        # New v0.5.0 fields
         "avg_task_velocity_ms": avg_task_velocity_ms,
         "preferred_stack": preferred_stack,
-        "recurring_blocker_classes": recurring_blocker_classes,
+        "recurring_blocker_classes": [{"text": bc, "count": cnt} for bc, cnt in blocker_class_rows],
         "total_task_checkpoints": total_task_checkpoints,
         "total_projects": len(projects),
     }
@@ -877,6 +923,15 @@ def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict
     if not key_words:
         return None
 
+    _word_re_cache: dict[str, re.Pattern] = {}
+
+    def _word_match(word: str, text: str) -> bool:
+        pat = _word_re_cache.get(word)
+        if pat is None:
+            pat = re.compile(r"\b" + re.escape(word) + r"\b")
+            _word_re_cache[word] = pat
+        return bool(pat.search(text))
+
     best_match: dict | None = None
     best_score = 0.0
 
@@ -884,7 +939,7 @@ def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict
     for i, cp in enumerate(checkpoints[1:], start=1):
         for hist_blocker in cp.get("blockers") or []:
             hist_lower = hist_blocker.lower()
-            matched = sum(1 for w in key_words if w in hist_lower)
+            matched = sum(1 for w in key_words if _word_match(w, hist_lower))
             score = matched / len(key_words)
 
             if score >= 0.5 and score > best_score:
@@ -892,7 +947,7 @@ def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict
                 next_cp = checkpoints[i - 1]
                 next_blockers = next_cp.get("blockers") or []
                 still_blocking = any(
-                    sum(1 for w in key_words if w in b.lower()) / len(key_words) >= 0.4
+                    sum(1 for w in key_words if _word_match(w, b.lower())) / len(key_words) >= 0.4
                     for b in next_blockers
                 )
                 resolved = not still_blocking

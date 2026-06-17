@@ -22,6 +22,7 @@ class Settings(BaseSettings):
     voyage_api_key: str | None = None
     ollama_host: str | None = None
     ollama_model: str = "qwen2.5-coder:7b"
+    planner_model: str = "claude-sonnet-4-6"
     db_path: Path = Path.home() / ".context-bridge" / "checkpoints.db"
     server_port: int = 7723
 
