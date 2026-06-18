@@ -152,3 +152,4 @@ When the PostToolUse output shows `[context-bridge] âš  Recurring error:` or `âš
 | GET | /profile | Cross-project developer profile |
 | GET | /stats | Total projects/checkpoints |
 | GET | /velocity/{project_id} | Velocity metrics and alert status |
+| DELETE | /projects/{project_id} | Remove all checkpoints for a project (use `context-bridge forget`) |

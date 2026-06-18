@@ -78,7 +78,7 @@ Embeddings are 256-dimensional float vectors stored in a `vec0` virtual table (s
 checkpoint saved → save_embedding(checkpoint_id, embed_text)
     │
     ├── embedding_api_key present AND voyageai installed?
-    │   └── Yes → call Voyage AI text-embedding-3-small → store real vector
+    │   └── Yes → call Voyage AI voyage-3-lite (256-dim) → store real vector
     └── No  → store zero vector as placeholder (schema stays intact, search disabled)
 
 SessionStart hook
