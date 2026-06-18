@@ -751,7 +751,7 @@ def build_profile() -> dict:
             "SELECT COUNT(*) FROM checkpoints WHERE checkpoint_type = 'task'"
         ).fetchone()[0]
         total_checkpoints = con.execute(
-            "SELECT COUNT(*) FROM checkpoints ORDER BY id DESC LIMIT 1000"
+            "SELECT COUNT(*) FROM (SELECT 1 FROM checkpoints ORDER BY id DESC LIMIT 1000)"
         ).fetchone()[0]
 
     projects: set[str] = {r[0] for r in project_rows if r[0]}
@@ -895,6 +895,17 @@ _BLOCKER_FILLER = frozenset({
     "not", "no", "and", "or", "but", "with", "for", "on", "it", "that",
 })
 
+# Module-level cache: patterns persist across calls within the same process.
+_WORD_RE_CACHE: dict[str, re.Pattern] = {}
+
+
+def _get_word_re(word: str) -> re.Pattern:
+    pat = _WORD_RE_CACHE.get(word)
+    if pat is None:
+        pat = re.compile(r"\b" + re.escape(word) + r"\b")
+        _WORD_RE_CACHE[word] = pat
+    return pat
+
 
 def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict | None:
     """Scan project history for a similar error and whether it was resolved.
@@ -917,14 +928,8 @@ def find_similar_blocker(project_id: str, new_blocker: str, n: int = 50) -> dict
     if not key_words:
         return None
 
-    _word_re_cache: dict[str, re.Pattern] = {}
-
     def _word_match(word: str, text: str) -> bool:
-        pat = _word_re_cache.get(word)
-        if pat is None:
-            pat = re.compile(r"\b" + re.escape(word) + r"\b")
-            _word_re_cache[word] = pat
-        return bool(pat.search(text))
+        return bool(_get_word_re(word).search(text))
 
     best_match: dict | None = None
     best_score = 0.0

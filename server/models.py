@@ -68,7 +68,7 @@ class SyncResponse(BaseModel):
     revised_plan: str
     priority_focus: str
     source: Literal["anthropic", "ollama", "rule-based"]
-    stagnation_count: int = 0
+    stagnation_count: int = 1
     stagnation_report: StagnationReport | None = None
     # Structured planner output — v0.5.0
     confidence: float = 1.0
