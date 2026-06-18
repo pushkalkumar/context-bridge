@@ -66,39 +66,49 @@ def current_pid() -> str:
 def do_status() -> None:
     data = _fetch("/health")
     if not data:
-        print(f"Backend    not running  (start with: context-bridge)")
+        print("  context-bridge  not running")
+        print()
+        print("  Start the backend:  context-bridge")
+        print("  Or background:      context-bridge &")
+        print("  Check install:      context-bridge install --help")
         return
-    print(f"Backend    running on port {data['port']}")
-    print(f"DB         {settings.db_path}")
 
-    s = _fetch("/stats")
+    s = _fetch("/stats") or {}
     projects_data = _fetch("/projects") or []
-    if s:
-        print(f"Projects   {s['total_projects']}")
-        print(f"Checkpoints {s['total_checkpoints']}")
-
     stagnant = [p for p in projects_data if p.get("stagnation_count", 0) >= 3]
+
+    print()
+    print(f"  Backend     running  (port {data['port']})")
+    print(f"  Database    {settings.db_path}")
+    print()
+    print(f"  Projects    {s.get('total_projects', 0)}")
+    print(f"  Checkpoints {s.get('total_checkpoints', 0)}  "
+          f"(stagnation events: {s.get('stagnation_events', 0)})")
     if stagnant:
         names = ", ".join(p["project_id"] for p in stagnant[:3])
-        suffix = f" → run `context-bridge why`  ({names})"
-        print(f"Stagnant   {len(stagnant)} project{'s' if len(stagnant) != 1 else ''}{suffix}")
+        extra = f"  +{len(stagnant) - 3} more" if len(stagnant) > 3 else ""
+        print(f"  Stagnant    {len(stagnant)} project{'s' if len(stagnant) != 1 else ''}  "
+              f"({names}{extra})  → context-bridge why")
     else:
-        print(f"Stagnant   none")
+        print(f"  Stagnant    none")
+    print()
 
-    planner = "rule-based (no LLM configured)"
     if settings.anthropic_api_key:
-        planner = f"Anthropic ({settings.planner_model})"
+        planner = f"Anthropic  ({settings.planner_model})"
     elif settings.resolved_ollama_host():
-        planner = f"Ollama ({settings.ollama_model})"
-    print(f"Planner    {planner}")
-    print(f"Velocity   tracking enabled")
-    embed_status = (
-        "enabled (voyageai)" if (settings.embedding_api_key() and _SQLITE_VEC_AVAILABLE)
-        else "disabled (set VOYAGE_API_KEY or ANTHROPIC_API_KEY and pip install voyageai)"
-        if _SQLITE_VEC_AVAILABLE
-        else "disabled (sqlite-vec not installed)"
-    )
-    print(f"Embeddings {embed_status}")
+        planner = f"Ollama     ({settings.ollama_model})"
+    else:
+        planner = "rule-based  (set ANTHROPIC_API_KEY for LLM planning)"
+    print(f"  Planner     {planner}")
+    print(f"  Velocity    tracking enabled")
+    if settings.embedding_api_key() and _SQLITE_VEC_AVAILABLE:
+        embed_status = "enabled  (voyageai)"
+    elif _SQLITE_VEC_AVAILABLE:
+        embed_status = "disabled  (set VOYAGE_API_KEY or ANTHROPIC_API_KEY, then: pip install voyageai)"
+    else:
+        embed_status = "disabled  (pip install 'claude-context-bridge[semantic]')"
+    print(f"  Embeddings  {embed_status}")
+    print()
 
 
 def do_list() -> None:
@@ -240,6 +250,31 @@ def do_replay() -> None:
         if plan:
             print(f"    Plan:    {plan[:100]}")
         print()
+
+
+def do_forget(project_id: str) -> None:
+    """Delete all checkpoints for a project, clearing its stagnation history."""
+    if not _fetch("/health"):
+        print("Backend not running. Start it with: context-bridge")
+        return
+
+    import urllib.request
+    try:
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{settings.server_port}/projects/{project_id}",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(req, timeout=5.0) as r:
+            import json as _json
+            data = _json.loads(r.read())
+        print(f"  Deleted {data.get('deleted', 0)} checkpoint(s) for '{project_id}'.")
+    except urllib.request.HTTPError as e:
+        if e.code == 404:
+            print(f"  Project '{project_id}' not found.")
+        else:
+            print(f"  Error: {e}")
+    except Exception as e:
+        print(f"  Error: {e}")
 
 
 def do_why() -> None:

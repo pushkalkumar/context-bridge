@@ -10,7 +10,7 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .cli import current_pid, do_diff, do_export, do_list, do_replay, do_status, do_why
+from .cli import current_pid, do_diff, do_export, do_forget, do_list, do_replay, do_status, do_why
 from .config import settings
 from .install import do_install, do_uninstall
 from .memory import (
@@ -104,7 +104,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Context Bridge",
     description="Stagnation detection, velocity tracking, and session continuity for Claude Code.",
-    version="0.7.0",
+    version="0.7.1",
     lifespan=lifespan,
 )
 
@@ -364,6 +364,7 @@ def run() -> None:
         prog="context-bridge",
         description="Stagnation detection and session continuity for Claude Code.",
     )
+    parser.add_argument("--version", "-V", action="version", version="context-bridge 0.7.1")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install",   help="Install skill + lifecycle hooks to ~/.claude/")
     sub.add_parser("uninstall", help="Remove hooks and the installed skill")
@@ -372,6 +373,10 @@ def run() -> None:
     sub.add_parser("list",      help="List all projects with checkpoint counts and type breakdown")
     sub.add_parser("why",       help="Show stagnation diagnosis and velocity for the current project")
     sub.add_parser("replay",    help="Show chronological attempt history for the current stagnant task")
+    sub.add_parser("stats",     help="Alias for status")
+
+    forget_p = sub.add_parser("forget", help="Delete all checkpoints for a project, clearing stagnation state")
+    forget_p.add_argument("project_id", nargs="?", default="", help="Project ID to forget (defaults to current repo/branch)")
 
     diff_p = sub.add_parser("diff", help="Show what changed between the two most recent task checkpoints")
     diff_p.add_argument("project_id", help="Project ID (reponame/branch)")
@@ -387,7 +392,7 @@ def run() -> None:
         do_install()
     elif args.cmd == "uninstall":
         do_uninstall()
-    elif args.cmd == "status":
+    elif args.cmd in ("status", "stats"):
         do_status()
     elif args.cmd == "list":
         do_list()
@@ -395,6 +400,9 @@ def run() -> None:
         do_why()
     elif args.cmd == "replay":
         do_replay()
+    elif args.cmd == "forget":
+        pid = args.project_id or current_pid()
+        do_forget(pid)
     elif args.cmd == "diff":
         pid = args.project_id
         if hasattr(args, "branch") and args.branch:

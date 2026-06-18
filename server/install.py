@@ -19,6 +19,7 @@ _SLASH_COMMANDS: dict[str, str] = {
     "cb-status": "Run `context-bridge status` in the terminal and show backend health, planner tier, velocity, and embedding status.",
     "cb-diff":   "Run `context-bridge diff` in the terminal and show what changed between the two most recent task checkpoints.",
     "cb-export": "Run `context-bridge export` in the terminal and write a CLAUDE.md-compatible Markdown snapshot of the current project's session history.",
+    "cb-forget": "Run `context-bridge forget` in the terminal to delete all checkpoints for the current project, resetting stagnation state and starting fresh.",
 }
 _HOOK_EVENTS = ("SessionStart", "PreToolUse", "PostToolUse", "Stop")
 
