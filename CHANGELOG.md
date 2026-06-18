@@ -5,6 +5,22 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.7.1] - 2026-06-18
+
+### Fixed
+- **`_word_re_cache` was a local variable** in `find_similar_blocker()` — the regex cache was recreated on every call, discarding all cached patterns. Moved to module-level `_WORD_RE_CACHE` with a helper `_get_word_re()`. Matching now amortizes compilation across calls.
+- **`build_profile()` COUNT(*) with LIMIT silently ignored** — `SELECT COUNT(*) FROM checkpoints ORDER BY id DESC LIMIT 1000` is a scalar aggregate; SQLite ignores the `LIMIT` clause on it, returning a full-table count. Changed to `SELECT COUNT(*) FROM (SELECT 1 FROM checkpoints ORDER BY id DESC LIMIT 1000)` which correctly counts at most 1000 rows.
+- **`SyncResponse.stagnation_count` defaulted to `0`** — stagnation counting starts at 1 (first appearance). The model field now correctly defaults to `1`, matching the semantics everywhere else in the codebase.
+- **Wrong embedding model in `docs/architecture.md`** — referenced `text-embedding-3-small` (OpenAI) instead of `voyage-3-lite` (Voyage AI). Fixed.
+
+### Changed
+- **`context-bridge status` output** — reformatted with consistent indentation, clearer labels, backend-down guidance ("Start the backend: context-bridge"), and stagnant project names inline.
+- **`--version` / `-V` flag** — `context-bridge --version` now prints the version string instead of showing the help and exiting non-zero.
+- **README** — restructured for faster conversion: problem statement before install, comparison table vs MEMORY.md and claude-mem, simplified "How it works" diagram, new "Three-tier planner" table, cleaner terminal output examples throughout.
+- **`docs/architecture.md`** — updated stagnation diagram and fixed embedding model reference.
+
+---
+
 ## [0.7.0] - 2026-06-14
 
 ### Added

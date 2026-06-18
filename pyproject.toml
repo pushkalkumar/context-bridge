@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 # Distribution name: "context-bridge" on PyPI is an unrelated RAG package.
 # The CLI command and repo name remain "context-bridge".
 name = "claude-context-bridge"
-version = "0.7.0"
+version = "0.7.1"
 description = "Catches Claude Code doom loops before they start: PreToolUse stagnation gate, cross-session attempt replay, blocker history matching, goal drift detection, and git-coherent session start."
 readme = "README.md"
 requires-python = ">=3.11"
