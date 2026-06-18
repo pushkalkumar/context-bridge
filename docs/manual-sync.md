@@ -64,3 +64,34 @@ curl -s -X POST http://localhost:7723/checkpoint \
     }
   }'
 ```
+
+## Record an outcome
+
+```bash
+curl -s -X POST http://localhost:7723/checkpoint \
+  -H "Content-Type: application/json" \
+  -d '{
+    "project_id": "my-app/main",
+    "user_goal": "ship auth",
+    "current_task": "Auth shipped to staging",
+    "progress_summary": "All tests green, deployed",
+    "event_type": "outcome",
+    "event_data": {
+      "result": "Login endpoint deployed to staging",
+      "impact": "Unblocks mobile team"
+    }
+  }'
+```
+
+## Delete a project (reset stagnation)
+
+```bash
+# Via CLI (uses current git repo/branch)
+context-bridge forget
+
+# Via CLI (explicit project ID)
+context-bridge forget my-app/main
+
+# Via HTTP
+curl -s -X DELETE http://localhost:7723/projects/my-app/main
+```
