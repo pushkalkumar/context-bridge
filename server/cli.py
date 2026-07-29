@@ -1,11 +1,25 @@
 import json
+import os
 import subprocess
+import sys
+import time
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import settings
 from .memory import _SQLITE_VEC_AVAILABLE
+
+_EVENT_REQUIRED_FLAGS = {
+    "failure": ("attempted", "because"),
+    "adr":     ("decision", "reason"),
+    "outcome": ("result", "impact"),
+}
+_EVENT_ALLOWED_FLAGS = {
+    "failure": ("attempted", "because"),
+    "adr":     ("decision", "reason", "tradeoff"),
+    "outcome": ("result", "impact"),
+}
 
 
 def _fmt_age(ts: str | int | None) -> str:
@@ -61,6 +75,204 @@ def current_pid() -> str:
         return f"{name}/{branch}" if branch and branch not in ("", "HEAD") else name
     except Exception:
         return name
+
+
+def _post_json(path: str, payload: dict, timeout: float = 20.0):
+    data = json.dumps(payload).encode()
+    req = urllib.request.Request(
+        f"http://127.0.0.1:{settings.server_port}{path}",
+        data=data, headers={"Content-Type": "application/json"}, method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+    except Exception:
+        return None
+
+
+def ensure_backend(wait_s: float = 6.0) -> bool:
+    """Start the backend in the background if it isn't running. True when healthy."""
+    if _fetch("/health"):
+        return True
+    if os.environ.get("CONTEXT_BRIDGE_NO_AUTOSTART"):
+        return False
+    settings.db_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path = settings.db_path.parent / "server.log"
+    # Re-exec through the current interpreter so PATH doesn't matter.
+    cmd = [
+        sys.executable, "-c",
+        "import sys; sys.argv = ['context-bridge']; from server.main import run; run()",
+    ]
+    try:
+        with open(log_path, "ab") as log:
+            subprocess.Popen(
+                cmd, stdout=log, stderr=log,
+                start_new_session=True, cwd=str(Path.home()),
+            )
+    except Exception:
+        return False
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        if _fetch("/health", timeout=0.5):
+            return True
+    return False
+
+
+# ── Git metadata (mirrors the hook's collection) ──────────────────────────────
+
+def _git_meta() -> dict:
+    meta: dict = {}
+    for key, cmd in (
+        ("git_diff_stat",   ["git", "diff", "--stat", "HEAD"]),
+        ("git_log_recent",  ["git", "log", "--oneline", "-5"]),
+        ("git_name_status", ["git", "diff", "--name-status", "HEAD"]),
+    ):
+        try:
+            meta[key] = subprocess.check_output(
+                cmd, stderr=subprocess.DEVNULL, text=True
+            ).strip()
+        except Exception:
+            pass
+    return meta
+
+
+def _files_from_diff_stat(diff_stat: str) -> list[str]:
+    files = []
+    for line in diff_stat.splitlines():
+        if "|" in line:
+            fname = line.split("|")[0].strip()
+            if fname:
+                files.append(fname)
+    return files
+
+
+# ── sync / event payload builders (pure — unit tested) ───────────────────────
+
+def build_sync_payload(
+    project_id: str, goal: str, task: str, progress: str,
+    next_action: str, blockers: list[str], git_meta: dict,
+) -> dict:
+    return {
+        "project_id": project_id,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "user_goal": goal,
+        "current_task": task,
+        "progress_summary": progress,
+        "current_state": {
+            "files_modified": _files_from_diff_stat(git_meta.get("git_diff_stat", "")),
+            "code_summary": "",
+            "architecture_notes": "",
+            **{k: v for k, v in git_meta.items() if v},
+        },
+        "blockers": blockers,
+        "next_intended_action": next_action,
+    }
+
+
+def build_event_payload(
+    kind: str, project_id: str, event_data: dict, goal: str, task: str,
+) -> dict:
+    summaries = {
+        "failure": f"Abandoned approach: {event_data.get('attempted', '')}",
+        "adr":     f"Decision: {event_data.get('decision', '')}",
+        "outcome": f"Result: {event_data.get('result', '')}",
+    }
+    return {
+        "project_id": project_id,
+        "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S"),
+        "user_goal": goal,
+        "current_task": task,
+        "progress_summary": summaries.get(kind, kind),
+        "blockers": [],
+        "next_intended_action": "",
+        "event_type": kind,
+        "event_data": event_data,
+    }
+
+
+def _print_sync_response(pid: str, resp: dict) -> None:
+    stag = resp.get("stagnation_count", 1)
+    conf = resp.get("confidence", 1.0)
+    source = resp.get("source", "")
+    print(f"  Synced {pid}  (stagnation {stag} · confidence {conf:.0%} · {source})")
+
+    instr = (resp.get("next_instruction") or "").strip()
+    if instr:
+        first, *rest = instr.splitlines()
+        print(f"  Plan:      {first}")
+        for line in rest[:6]:
+            print(f"             {line}")
+    priority = (resp.get("priority_focus") or "").strip()
+    if priority:
+        print(f"  Priority:  {priority}")
+
+    blocker_class = (resp.get("blocker_class") or "none").strip()
+    if blocker_class and blocker_class != "none":
+        print(f"  ⚠ Blocker class: {blocker_class} — address this before retrying")
+    if resp.get("decomposition_suggested"):
+        print("  ⚠ Decompose: split into subtasks of 30 minutes or less before starting")
+    alternatives = resp.get("alternatives") or []
+    if alternatives:
+        print(f"  Alt:       {alternatives[0][:120]}")
+
+    report = resp.get("stagnation_report")
+    if report:
+        print(f"  ⚠ STAGNATION ({report.get('checkpoint_count', 0)} sessions, "
+              f"{report.get('elapsed_hours', 0)}h): {report.get('primary_blocker') or 'no blocker recorded'}")
+        rec = report.get("recommendation", "")
+        if rec:
+            print(f"    Action: {rec[:160]}")
+
+    match = resp.get("blocker_match")
+    if match:
+        label = "Recurring error (was resolved)" if match.get("resolved") else "Persistent error (never resolved)"
+        print(f"  ⚠ {label}: {(match.get('matched_blocker') or '')[:80]}")
+        fix = (match.get("next_instruction") or "")[:120]
+        if fix:
+            print(f"    Previous plan: {fix}")
+
+
+def do_sync(goal: str, task: str, progress: str, next_action: str, blockers: list[str]) -> None:
+    if not ensure_backend():
+        print("Backend unreachable and auto-start failed. Diagnose: context-bridge status")
+        raise SystemExit(1)
+    pid = current_pid()
+    payload = build_sync_payload(pid, goal, task, progress, next_action, blockers, _git_meta())
+    resp = _post_json("/sync", payload)
+    if not resp or not (resp.get("next_instruction") or "").strip():
+        print("Sync failed — backend returned no plan. Diagnose: context-bridge status")
+        raise SystemExit(1)
+    _print_sync_response(pid, resp)
+
+
+def do_event(kind: str, flags: dict, goal: str, task: str) -> None:
+    missing = [f for f in _EVENT_REQUIRED_FLAGS[kind] if not flags.get(f)]
+    if missing:
+        print(f"Missing required flag(s) for '{kind}': " + " ".join(f"--{m}" for m in missing))
+        raise SystemExit(2)
+    if not ensure_backend():
+        print("Backend unreachable and auto-start failed. Diagnose: context-bridge status")
+        raise SystemExit(1)
+    pid = current_pid()
+
+    # Default goal/task from the latest checkpoint so events stay attached
+    # to the task history they belong to.
+    if not (goal and task):
+        history = _fetch(f"/history/{pid}?limit=1") or []
+        if history:
+            goal = goal or history[0].get("user_goal", "")
+            task = task or history[0].get("current_task", "")
+    goal = goal or f"({kind} event)"
+    task = task or f"({kind} event)"
+
+    event_data = {k: v for k, v in flags.items() if v and k in _EVENT_ALLOWED_FLAGS[kind]}
+    payload = build_event_payload(kind, pid, event_data, goal, task)
+    resp = _post_json("/checkpoint", payload)
+    if not resp:
+        print("Event not recorded — backend error. Diagnose: context-bridge status")
+        raise SystemExit(1)
+    print(f"  Recorded {kind} event for {pid}.")
 
 
 def do_status() -> None:

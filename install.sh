@@ -90,49 +90,7 @@ mkdir -p "$HOME/.context-bridge"
 context-bridge install
 
 echo ""
-echo -e "${GREEN}Done.${NC}"
-echo ""
-echo -e "${CYAN}Start the backend:${NC}"
-echo "  context-bridge"
-echo ""
-
-if [[ "$OSTYPE" == darwin* ]]; then
-  launchd_choice=$(ask "Auto-start the backend on login? (macOS only) [y/N]: ")
-  case "$launchd_choice" in
-    [yY]|[yY][eE][sS])
-      mkdir -p "$HOME/Library/LaunchAgents"
-      cat > "$PLIST" <<'EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>com.context-bridge.server</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>/bin/bash</string>
-    <string>-lc</string>
-    <string>context-bridge</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>StandardOutPath</key>
-  <string>/tmp/context-bridge-server.log</string>
-  <key>StandardErrorPath</key>
-  <string>/tmp/context-bridge-server.err</string>
-</dict>
-</plist>
-EOF
-      launchctl load "$PLIST" >/dev/null 2>&1 || true
-      echo "Launch agent installed at $PLIST"
-      echo "Unload it with: launchctl unload $PLIST"
-      ;;
-    *) ;;
-  esac
-fi
-
+echo -e "${GREEN}Done.${NC} The backend auto-starts with your next Claude Code session."
 echo ""
 echo -e "${CYAN}Add AI planning (optional):${NC}"
 echo "  echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.context-bridge/.env"

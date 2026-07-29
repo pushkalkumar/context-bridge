@@ -13,8 +13,10 @@ Handles:
 """
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -23,7 +25,7 @@ from pathlib import Path
 
 BASE_URL = os.environ.get("CONTEXT_BRIDGE_URL", "http://127.0.0.1:7723")
 _STATE_DIR = Path("/tmp/context-bridge-hooks")
-_TASK_TOOL_NAMES = {"Task", "task"}
+_TASK_TOOL_NAMES = {"Task", "task", "Agent", "agent"}
 
 _SEARCH_SIMILARITY_THRESHOLD = 0.75
 
@@ -284,6 +286,51 @@ def _related_work_lines(next_instr: str, current_pid: str) -> list[str]:
     return []
 
 
+# ── Backend auto-start ────────────────────────────────────────────────────────
+
+_FALLBACK_BINARY_DIRS = (
+    Path.home() / ".local" / "bin",
+    Path("/opt/homebrew/bin"),
+    Path("/usr/local/bin"),
+)
+
+
+def _find_binary() -> str | None:
+    exe = shutil.which("context-bridge")
+    if exe:
+        return exe
+    for d in _FALLBACK_BINARY_DIRS:
+        candidate = d / "context-bridge"
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _autostart_backend(wait_s: float = 6.0) -> bool:
+    """Spawn the backend detached and wait for it to come up. True when healthy."""
+    if os.environ.get("CONTEXT_BRIDGE_NO_AUTOSTART"):
+        return False
+    exe = _find_binary()
+    if not exe:
+        return False
+    log_dir = Path.home() / ".context-bridge"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        with open(log_dir / "server.log", "ab") as log:
+            subprocess.Popen(
+                [exe, "start"], stdout=log, stderr=log,
+                start_new_session=True, cwd=str(Path.home()),
+            )
+    except Exception:
+        return False
+    deadline = time.monotonic() + wait_s
+    while time.monotonic() < deadline:
+        time.sleep(0.25)
+        if _get("/health", timeout=0.5):
+            return True
+    return False
+
+
 # ── SessionStart ──────────────────────────────────────────────────────────────
 
 def _build_profile_lines(profile: dict) -> list[str]:
@@ -403,12 +450,16 @@ def _on_session_start(event: dict) -> None:
     _write(sid, "tool_count", "0")
 
     if not _get("/health"):
-        print(
-            "[context-bridge] Backend not running. Start it with: context-bridge\n"
-            "Memory hooks are wired but inactive until the server is up.",
-            file=sys.stderr,
-        )
-        return
+        if _autostart_backend():
+            print("[context-bridge] Backend auto-started.", file=sys.stderr)
+        else:
+            print(
+                "[context-bridge] Backend not running and auto-start failed. "
+                "Start it with: context-bridge  (or check ~/.context-bridge/server.log)\n"
+                "Memory hooks are wired but inactive until the server is up.",
+                file=sys.stderr,
+            )
+            return
 
     # Fire all independent fetches in parallel — cuts sequential latency from
     # 5+ round-trips down to ~1 round-trip worth of wall time.

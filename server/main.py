@@ -10,7 +10,18 @@ import uvicorn
 from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.responses import HTMLResponse, JSONResponse
 
-from .cli import current_pid, do_diff, do_export, do_forget, do_list, do_replay, do_status, do_why
+from .cli import (
+    current_pid,
+    do_diff,
+    do_event,
+    do_export,
+    do_forget,
+    do_list,
+    do_replay,
+    do_status,
+    do_sync,
+    do_why,
+)
 from .config import settings
 from .install import do_install, do_uninstall
 from .memory import (
@@ -104,7 +115,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Context Bridge",
     description="Stagnation detection, velocity tracking, and session continuity for Claude Code.",
-    version="0.7.1",
+    version="0.8.0",
     lifespan=lifespan,
 )
 
@@ -364,7 +375,7 @@ def run() -> None:
         prog="context-bridge",
         description="Stagnation detection and session continuity for Claude Code.",
     )
-    parser.add_argument("--version", "-V", action="version", version="context-bridge 0.7.1")
+    parser.add_argument("--version", "-V", action="version", version="context-bridge 0.8.0")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("install",   help="Install skill + lifecycle hooks to ~/.claude/")
     sub.add_parser("uninstall", help="Remove hooks and the installed skill")
@@ -374,6 +385,26 @@ def run() -> None:
     sub.add_parser("why",       help="Show stagnation diagnosis and velocity for the current project")
     sub.add_parser("replay",    help="Show chronological attempt history for the current stagnant task")
     sub.add_parser("stats",     help="Alias for status")
+
+    sync_p = sub.add_parser("sync", help="Checkpoint the current task and print the plan (used by the Claude skill)")
+    sync_p.add_argument("--goal", required=True, help="Session goal")
+    sync_p.add_argument("--task", required=True, help="Current task")
+    sync_p.add_argument("--progress", required=True, help="What changed since the last sync")
+    sync_p.add_argument("--next", dest="next_action", default="", help="Next intended action")
+    sync_p.add_argument("--blocker", dest="blockers", action="append", default=[],
+                        help="Blocker hit (repeatable; paste the exact error)")
+
+    event_p = sub.add_parser("event", help="Record a structured event: failure, adr, or outcome")
+    event_p.add_argument("kind", choices=["failure", "adr", "outcome"])
+    event_p.add_argument("--goal", default="", help="Session goal (defaults to last checkpoint's)")
+    event_p.add_argument("--task", default="", help="Related task (defaults to last checkpoint's)")
+    event_p.add_argument("--attempted", default="", help="failure: what was tried")
+    event_p.add_argument("--because", default="", help="failure: why it was abandoned")
+    event_p.add_argument("--decision", default="", help="adr: the decision made")
+    event_p.add_argument("--reason", default="", help="adr: why")
+    event_p.add_argument("--tradeoff", default="", help="adr: accepted tradeoff")
+    event_p.add_argument("--result", default="", help="outcome: what happened")
+    event_p.add_argument("--impact", default="", help="outcome: why it matters")
 
     forget_p = sub.add_parser("forget", help="Delete all checkpoints for a project, clearing stagnation state")
     forget_p.add_argument("project_id", nargs="?", default="", help="Project ID to forget (defaults to current repo/branch)")
@@ -400,6 +431,19 @@ def run() -> None:
         do_why()
     elif args.cmd == "replay":
         do_replay()
+    elif args.cmd == "sync":
+        do_sync(args.goal, args.task, args.progress, args.next_action, args.blockers)
+    elif args.cmd == "event":
+        do_event(
+            args.kind,
+            {
+                "attempted": args.attempted, "because": args.because,
+                "decision": args.decision, "reason": args.reason, "tradeoff": args.tradeoff,
+                "result": args.result, "impact": args.impact,
+            },
+            args.goal,
+            args.task,
+        )
     elif args.cmd == "forget":
         pid = args.project_id or current_pid()
         do_forget(pid)
