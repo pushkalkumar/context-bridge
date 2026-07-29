@@ -28,8 +28,7 @@ Python 3.11+ required.
 
 ```bash
 pip install claude-context-bridge
-context-bridge install    # wires hooks into ~/.claude/settings.json
-context-bridge            # start the backend (separate terminal or background)
+context-bridge install
 ```
 
 Or one-liner:
@@ -38,7 +37,7 @@ Or one-liner:
 curl -fsSL https://raw.githubusercontent.com/pushkalkumar/context-bridge/main/install.sh | bash
 ```
 
-Done. The hooks fire automatically on the next Claude Code session — no restart required. After a session completes its first task, context-bridge begins building history. From the second session onward, context is injected before Claude reads your first message.
+That's it. The backend auto-starts on your next Claude Code session — nothing to keep running, no separate terminal. The hooks fire automatically — no restart required. After a session completes its first task, context-bridge begins building history. From the second session onward, context is injected before Claude reads your first message.
 
 ---
 
@@ -194,9 +193,11 @@ They compose. CLAUDE.md holds your conventions. context-bridge holds your state.
 ## Commands
 
 ```bash
-context-bridge             # start the backend server
+context-bridge             # start the backend server (auto-started by the hook normally)
 context-bridge install     # (re)install hooks and skill into ~/.claude/
 context-bridge uninstall   # remove hooks and skill (database preserved)
+context-bridge sync        # checkpoint the current task and print the plan (used by the skill)
+context-bridge event       # record a failure / adr / outcome event (used by the skill)
 context-bridge status      # backend health, planner tier, embedding status
 context-bridge why         # stagnation diagnosis + velocity for the current project
 context-bridge replay      # full attempt history for the current stagnant task
@@ -306,7 +307,7 @@ Issues and PRs welcome: [open issues](https://github.com/pushkalkumar/context-br
 
 ## Why not just use CLAUDE.md?
 
-CLAUDE.md is a static instruction set you write once and update manually. context-bridge is a stateful feedback loop that updates automatically after every task. CLAUDE.md updates when you remember to; context-bridge updates after every `Task` tool call. CLAUDE.md has no concept of stagnation — the same blocked task can appear in 10 sessions and CLAUDE.md will never know. context-bridge detects it at session 3 and forces decomposition. CLAUDE.md is scoped to one project; context-bridge builds a cross-project developer profile (preferred stack, velocity baseline, recurring blocker classes) that transfers to new projects automatically.
+CLAUDE.md is a static instruction set you write once and update manually. context-bridge is a stateful feedback loop that updates automatically after every task. CLAUDE.md updates when you remember to; context-bridge updates after every subagent (`Task`/`Agent`) tool call. The skill installs to `~/.claude/skills/context-bridge/` and loads on demand, so it costs one description line per session instead of a permanent CLAUDE.md import. CLAUDE.md has no concept of stagnation — the same blocked task can appear in 10 sessions and CLAUDE.md will never know. context-bridge detects it at session 3 and forces decomposition. CLAUDE.md is scoped to one project; context-bridge builds a cross-project developer profile (preferred stack, velocity baseline, recurring blocker classes) that transfers to new projects automatically.
 
 They compose. CLAUDE.md holds your conventions. context-bridge holds your state.
 

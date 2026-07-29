@@ -5,6 +5,26 @@ Format loosely follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.8.0] - 2026-07-29
+
+### Added
+- **Backend auto-start** — the SessionStart hook now spawns the server detached (logs to `~/.context-bridge/server.log`) when `/health` fails and waits up to 6s for it to come up. Install is now two commands with nothing to keep running; the launchd prompt was removed from `install.sh` (existing launch agents are still cleaned up on uninstall). Opt out with `CONTEXT_BRIDGE_NO_AUTOSTART=1`. The `sync`/`event` CLI commands auto-start the backend too.
+- **`context-bridge sync` CLI command** — checkpoints the current task and prints the plan. Derives the project ID, gathers git state, and formats the planner response (plan, priority, stagnation, confidence, blocker class, decomposition, alternatives, blocker match) for Claude to read. Flags: `--goal --task --progress --next --blocker` (repeatable).
+- **`context-bridge event` CLI command** — records structured `failure` / `adr` / `outcome` events with per-kind flags (`--attempted/--because`, `--decision/--reason/--tradeoff`, `--result/--impact`). Goal and task default to the latest checkpoint's so events stay attached to their task history.
+
+### Changed
+- **Skill rewritten as a proper Agent Skill** — `skill/CLAUDE.md` replaced by `skill/SKILL.md` + `skill/references/api.md`. Installs to `~/.claude/skills/context-bridge/` and loads on demand instead of being `@`-imported into global CLAUDE.md, cutting the always-on context cost from ~2,500 tokens per session to one description line. `context-bridge install` migrates pre-0.8.0 installs automatically (removes the CLAUDE.md import line and `~/.claude/context-bridge.md`); `uninstall` cleans both layouts.
+- **Skill is CLI-first** — the skill instructs Claude to run `context-bridge sync` / `context-bridge event` instead of hand-building curl JSON. Payload construction, project ID derivation, and the backend URL all moved out of the skill into the CLI; the raw HTTP API remains documented in `references/api.md` for integrations. Fixes two 0.7.x defects in one move: the skill never stated the backend address, and its sed-based project ID snippet produced IDs like `/main` in remote-less repos, silently splitting history.
+- **Session start is no longer blocking** — the skill states restored context in one line and proceeds; it only asks for confirmation when a goal-drift or stagnation warning is present. Replaces the "Still accurate?" question on every project's first session.
+- **Sync cadence defined** — `/sync` on goal changes, task completions, and blockers; `/checkpoint` for failure/adr/outcome events; never per-message (hooks cover subagent completions and session end).
+
+### Fixed
+- **Auto-checkpoint and the stagnation gate were dead on current Claude Code** — the hook matched tool names `Task`/`task`, but newer versions spawn subagents via the `Agent` tool. Both names are now recognized.
+- **Structured event examples were invalid** — the documented `failure`/`adr`/`outcome` payloads omitted `user_goal`, `current_task`, and `progress_summary`, which `CheckpointIn` requires; posting them verbatim returned 422. `references/api.md` now shows complete valid payloads.
+- **Install output omitted `/cb-forget`** — six slash commands are installed; only five were printed.
+
+---
+
 ## [0.7.1] - 2026-06-18
 
 ### Fixed
